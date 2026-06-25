@@ -33,6 +33,7 @@ exit code when the runbook reports failure, 0 on success.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -254,106 +255,143 @@ def runbook(
     return RunbookResult(ok=True, failed_phase=None, dry_run=dry_run)
 
 
+def _env(name: str) -> str | None:
+    """Return env var ``name``'s value, or ``None`` when it is unset or empty."""
+    return os.environ.get(name) or None
+
+
+def _env_list(name: str) -> list[str]:
+    """Parse a comma-separated env var into a list (``[]`` when unset)."""
+    raw = _env(name)
+    return [part.strip() for part in raw.split(",") if part.strip()] if raw else []
+
+
+def _env_flag(name: str) -> bool:
+    """Interpret env var ``name`` as a boolean flag (``1``/``true``/``yes``/``on``)."""
+    return (os.environ.get(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _add_required(
+    parser: argparse.ArgumentParser, flag: str, env_var: str, help_text: str
+) -> None:
+    """Add a required string arg whose default comes from ``env_var``.
+
+    When ``env_var`` is set it supplies the value and the flag becomes optional
+    on the command line; otherwise the flag stays mandatory. The env-var name is
+    appended to the help text so ``--help`` documents the override.
+    """
+    default = _env(env_var)
+    parser.add_argument(
+        flag,
+        default=default,
+        required=default is None,
+        help=f"{help_text} [env: {env_var}]",
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    """Build the ``rs-migration`` argument parser."""
+    """Build the ``rs-migration`` argument parser.
+
+    Every parameter falls back to its ``RS_*`` environment variable (see
+    ``.env.example``); a required parameter stays mandatory only when its env
+    var is unset, so a fully-populated ``.env`` lets the CLI run with no flags.
+    """
     parser = argparse.ArgumentParser(
         prog="rs-migration",
         description=(
-            "Drive the end-to-end SSRS->PBIRS migration runbook (impl-doc §6)."
+            "Drive the end-to-end SSRS->PBIRS migration runbook (impl-doc §6). "
+            "Every flag falls back to its RS_* environment variable."
         ),
     )
-    parser.add_argument(
-        "--server", required=True, help="Target PBIRS hostname (no scheme/path)."
+    _add_required(
+        parser, "--server", "RS_SERVER",
+        "Target PBIRS hostname (no scheme/path).",
     )
-    parser.add_argument(
-        "--vault", required=True, help="Azure Key Vault name for stored secrets."
+    _add_required(
+        parser, "--vault", "RS_VAULT",
+        "Azure Key Vault name for stored secrets.",
     )
-    parser.add_argument(
-        "--key-path",
-        required=True,
-        help="Filesystem path of the .snk encryption key.",
+    _add_required(
+        parser, "--key-path", "RS_KEY_PATH",
+        "Filesystem path of the .snk encryption key.",
     )
-    parser.add_argument(
-        "--key-password-secret",
-        required=True,
-        help="Key Vault secret name holding the key password.",
+    _add_required(
+        parser, "--key-password-secret", "RS_KEY_PASSWORD_SECRET",
+        "Key Vault secret name holding the key password.",
     )
-    parser.add_argument(
-        "--snk-secret",
-        required=True,
-        help="Key Vault secret name the base64 .snk is pushed to.",
+    _add_required(
+        parser, "--snk-secret", "RS_SNK_SECRET",
+        "Key Vault secret name the base64 .snk is pushed to.",
     )
-    parser.add_argument(
-        "--source-sql-instance",
-        required=True,
-        help="SOURCE SQL instance the ReportServer DBs are backed up FROM (B7).",
+    _add_required(
+        parser, "--source-sql-instance", "RS_SOURCE_SQL_INSTANCE",
+        "SOURCE SQL instance the ReportServer DBs are backed up FROM (B7).",
     )
-    parser.add_argument(
-        "--target-sql-instance",
-        required=True,
-        help="TARGET SQL instance the ReportServer DBs are restored ONTO (B8).",
+    _add_required(
+        parser, "--target-sql-instance", "RS_TARGET_SQL_INSTANCE",
+        "TARGET SQL instance the ReportServer DBs are restored ONTO (B8).",
     )
-    parser.add_argument(
-        "--azure-base-url",
-        required=True,
-        help="Blob container URL backups are written to / restored from.",
+    _add_required(
+        parser, "--azure-base-url", "RS_AZURE_BASE_URL",
+        "Blob container URL backups are written to / restored from.",
     )
     parser.add_argument(
         "--blob-model",
-        default="SAS",
+        default=_env("RS_BLOB_MODEL") or "SAS",
         choices=["SAS", "StorageKey", "ManagedIdentity"],
-        help="Blob-auth model for backup/restore (default: SAS).",
+        help="Blob-auth model for backup/restore (default: SAS). [env: RS_BLOB_MODEL]",
     )
-    parser.add_argument(
-        "--database-server-name",
-        required=True,
-        help="SQL server PBIRS is pointed at (B9).",
+    _add_required(
+        parser, "--database-server-name", "RS_DATABASE_SERVER_NAME",
+        "SQL server PBIRS is pointed at (B9).",
     )
-    parser.add_argument(
-        "--database-name",
-        required=True,
-        help="ReportServer database name to bind (B9) and clean (B11).",
+    _add_required(
+        parser, "--database-name", "RS_DATABASE_NAME",
+        "ReportServer database name to bind (B9) and clean (B11).",
     )
-    parser.add_argument(
-        "--stale-machine-name",
-        required=True,
-        help="Stale source machine whose dbo.Keys row is removed (B11).",
+    _add_required(
+        parser, "--stale-machine-name", "RS_STALE_MACHINE_NAME",
+        "Stale source machine whose dbo.Keys row is removed (B11).",
     )
-    parser.add_argument(
-        "--active-machine-name",
-        required=True,
-        help="Active target machine that must never be deleted (B11).",
+    _add_required(
+        parser, "--active-machine-name", "RS_ACTIVE_MACHINE_NAME",
+        "Active target machine that must never be deleted (B11).",
     )
     parser.add_argument(
         "--report",
         dest="reports",
         action="append",
-        default=[],
-        help="Catalog-item id to render-test (repeatable).",
+        default=_env_list("RS_REPORTS"),
+        help="Catalog-item id to render-test (repeatable). [env: RS_REPORTS, comma-separated]",
     )
     parser.add_argument(
         "--data-source",
         dest="data_sources",
         action="append",
-        default=[],
-        help="Data-source id to probe (repeatable).",
+        default=_env_list("RS_DATA_SOURCES"),
+        help="Data-source id to probe (repeatable). [env: RS_DATA_SOURCES, comma-separated]",
     )
     parser.add_argument(
-        "--username", default=None, help="NTLM username (enables NTLM auth)."
+        "--username",
+        default=_env("RS_USERNAME"),
+        help="NTLM username (enables NTLM auth). [env: RS_USERNAME]",
     )
     parser.add_argument(
-        "--password", default=None, help="NTLM password (with --username)."
+        "--password",
+        default=_env("RS_PASSWORD"),
+        help="NTLM password (with --username). [env: RS_PASSWORD]",
     )
     parser.add_argument(
         "--scheme",
-        default="https",
+        default=_env("RS_SCHEME") or "https",
         choices=["http", "https"],
-        help="URL scheme for the report server (default: https).",
+        help="URL scheme for the report server (default: https). [env: RS_SCHEME]",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Run only the read-only phases (no mutating cmdlets).",
+        default=_env_flag("RS_DRY_RUN"),
+        help="Run only the read-only phases (no mutating cmdlets). [env: RS_DRY_RUN]",
     )
     return parser
 

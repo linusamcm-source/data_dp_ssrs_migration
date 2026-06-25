@@ -1,4 +1,5 @@
 docs
+.env
 .repomix-output.xml
 .claude/repomix/
 .venv/
