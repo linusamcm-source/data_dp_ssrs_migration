@@ -239,6 +239,40 @@ def test_store_with_credentials_succeeds_case_insensitive(mode):
         assert body[0]["CredentialRetrieval"] == mode
 
 
+# --- OData path injection: single quotes/spaces are escaped+encoded ----------
+
+
+def test_item_path_with_quote_and_space_is_escaped_and_encoded():
+    """A path containing a single quote and a space must not break out of the
+    OData string literal: the quote is doubled (OData escaping) then percent-
+    encoded, the space is percent-encoded, and the request still issues to the
+    DataSources endpoint."""
+    client = _client()
+    with requests_mock.Mocker() as m:
+        _mock_handshake(m)
+        m.put(requests_mock.ANY, status_code=200, json={})
+
+        # A malicious / awkward path: a quote that would otherwise close the
+        # literal, plus a space.
+        rekey(
+            client,
+            "/Sales/O'Brien Reports",
+            "Report",
+            credential_retrieval="Integrated",
+        )
+
+        write = next(r for r in m.request_history if r.method == "PUT")
+        # The raw quote must never appear unescaped inside the literal, and the
+        # space must be encoded — together that means no literal breakout.
+        assert "/Sales/O'Brien Reports" not in write.url
+        assert " " not in write.url
+        # OData doubles internal quotes; percent-encoded that is %27%27.
+        assert "%27%27" in write.url
+        # The endpoint is still the item's DataSources collection.
+        assert write.url.endswith("/DataSources")
+        assert write.url.startswith(f"{_BASE}/CatalogItems(Path=")
+
+
 # --- supporting: DataSet routes via PUT, unknown item type rejected ----------
 
 

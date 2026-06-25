@@ -150,6 +150,63 @@ Describe 'Set-RsMigrationDataSource' {
         }
     }
 
+    # ---- H2: body always carries CredentialRetrieval (cross-stack parity) ----
+    Context 'H2 guarantees CredentialRetrieval is in the body actually sent' {
+
+        It 'injects CredentialRetrieval into the data source written when the GET result omits it' {
+            InModuleScope RsMigration {
+                # A GET result whose data source has NO CredentialRetrieval property.
+                $ds = [pscustomobject]@{ Name = 'OrphanDS'; ConnectString = 'cs' }
+                Mock Get-RsRestItemDataSource { return $ds }
+
+                $script:sentDataSources = $null
+                Mock Set-RsRestItemDataSource { $script:sentDataSources = @($DataSources) }
+
+                $result = Set-RsMigrationDataSource -RsItem '/Sales/Orders' -RsItemType Report
+
+                # The objects ACTUALLY passed to the cmdlet must carry CredentialRetrieval.
+                $sent = $script:sentDataSources[0]
+                $sent.PSObject.Properties.Name | Should -Contain 'CredentialRetrieval'
+                [string]::IsNullOrEmpty($sent.CredentialRetrieval) | Should -BeFalse
+
+                # And the observability artifact reflects what was sent.
+                $body = $result.BodyJson | ConvertFrom-Json
+                @($body)[0].PSObject.Properties.Name | Should -Contain 'CredentialRetrieval'
+                [string]::IsNullOrEmpty(@($body)[0].CredentialRetrieval) | Should -BeFalse
+            }
+        }
+
+        It 'normalizes an empty CredentialRetrieval to a canonical value before writing' {
+            InModuleScope RsMigration {
+                # The property is present but empty -- still not a valid body value.
+                $ds = [pscustomobject]@{ Name = 'EmptyRetrievalDS'; CredentialRetrieval = ''; ConnectString = 'cs' }
+                Mock Get-RsRestItemDataSource { return $ds }
+
+                $script:sentDataSources = $null
+                Mock Set-RsRestItemDataSource { $script:sentDataSources = @($DataSources) }
+
+                Set-RsMigrationDataSource -RsItem '/Sales/Orders' -RsItemType Report
+
+                [string]::IsNullOrEmpty($script:sentDataSources[0].CredentialRetrieval) | Should -BeFalse
+            }
+        }
+
+        It 'preserves an existing CredentialRetrieval value rather than overwriting it' {
+            InModuleScope RsMigration {
+                $ds = [pscustomobject]@{ Name = 'KeepDS'; CredentialRetrieval = 'Integrated'; ConnectString = 'cs' }
+                Mock Get-RsRestItemDataSource { return $ds }
+
+                $script:sentDataSources = $null
+                Mock Set-RsRestItemDataSource { $script:sentDataSources = @($DataSources) }
+
+                $result = Set-RsMigrationDataSource -RsItem '/Sales/Orders' -RsItemType Report
+
+                $script:sentDataSources[0].CredentialRetrieval | Should -Be 'Integrated'
+                (@($result.BodyJson | ConvertFrom-Json)[0]).CredentialRetrieval | Should -Be 'Integrated'
+            }
+        }
+    }
+
     # ---- AC4: Store without CredentialsInServer throws -----------------------
     Context 'AC4 validates Store credential-retrieval' {
 

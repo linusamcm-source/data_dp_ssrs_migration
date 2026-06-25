@@ -16,6 +16,7 @@ Mirrors ``ReportingServicesTools``' ``New-RsRestSession``:
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import requests
@@ -27,6 +28,31 @@ _XSRF_COOKIE = "XSRF-TOKEN"
 _XSRF_HEADER = "X-XSRF-TOKEN"
 #: Relative endpoint probed to obtain the XSRF token.
 _XSRF_PROBE = "me"
+#: Marker substituted for a credential-bearing body in the exception message.
+_REDACTION = "[redacted: response body may contain credentials]"
+#: Max characters of a non-credential body included in the exception message.
+_BODY_PREVIEW = 200
+#: Credential-like tokens; on a failed write the server may echo the request
+#: payload back, which can carry a Password/Secret. Matched case-insensitively.
+_CREDENTIAL_PATTERN = re.compile(r"password|secret", re.IGNORECASE)
+
+
+def _safe_body_for_message(body: str) -> str:
+    """Render ``body`` safe to embed in a (loggable) exception message.
+
+    If the body looks like it carries a credential (case-insensitive
+    ``password``/``secret``), it is replaced wholesale with a redaction marker
+    so logging the exception never leaks the secret. Otherwise a short
+    truncated preview is returned. The full body is always retained on
+    :attr:`RestClientError.body` for explicit debugging.
+    """
+    if not body:
+        return ""
+    if _CREDENTIAL_PATTERN.search(body):
+        return _REDACTION
+    if len(body) > _BODY_PREVIEW:
+        return body[:_BODY_PREVIEW] + "..."
+    return body
 
 
 class RestClientError(Exception):
@@ -36,7 +62,8 @@ class RestClientError(Exception):
         self.status_code = status_code
         self.url = url
         self.body = body
-        super().__init__(f"PBIRS REST {status_code} for {url}: {body}")
+        safe_body = _safe_body_for_message(body)
+        super().__init__(f"PBIRS REST {status_code} for {url}: {safe_body}")
 
 
 class RestClient:

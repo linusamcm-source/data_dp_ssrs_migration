@@ -6,8 +6,12 @@ function Set-RsMigrationDataSource {
         lost-key re-key path.
     .DESCRIPTION
         Reads the item's current data sources via Get-RsRestItemDataSource
-        (get-then-set), validates the credential preconditions the underlying
-        Set-RsRestItemDataSource enforces, then writes them back.
+        (get-then-set), normalizes each so the body always carries
+        CredentialRetrieval (impl-doc section 8.1; injecting a canonical 'None'
+        only when the GET result omits it), validates the credential
+        preconditions the underlying Set-RsRestItemDataSource enforces, then
+        writes those normalized objects back. The serialized .BodyJson is the
+        same normalized payload handed to the cmdlet.
 
         The HTTP verb is type-dependent and is driven by -RsItemType, which is
         forwarded verbatim to Set-RsRestItemDataSource: 'Report'/'DataSet' make
@@ -64,6 +68,25 @@ function Set-RsMigrationDataSource {
 
     # --- GET first (get-then-set) ---------------------------------------------
     $dataSources = @(Get-RsRestItemDataSource -RsItem $RsItem @connection)
+
+    # --- Normalize: the body MUST always carry CredentialRetrieval ------------
+    # impl-doc section 8.1 requires every data source written back to include
+    # CredentialRetrieval even though the published schema understates it, and
+    # the Python rekey counterpart always injects it. Set-RsRestItemDataSource
+    # serializes exactly the -DataSources objects it is handed, so a GET result
+    # that omits CredentialRetrieval would otherwise be written WITHOUT it. Add
+    # a canonical 'None' when (and only when) it is missing/empty; an existing
+    # value is preserved untouched.
+    foreach ($ds in $dataSources) {
+        $retrievalProp = $ds.PSObject.Properties['CredentialRetrieval']
+        if ($null -eq $retrievalProp) {
+            $ds.PSObject.Properties.Add(
+                [System.Management.Automation.PSNoteProperty]::new('CredentialRetrieval', 'None'))
+        }
+        elseif ([string]::IsNullOrEmpty($retrievalProp.Value)) {
+            $retrievalProp.Value = 'None'
+        }
+    }
 
     # --- Validate each data source's credential preconditions -----------------
     foreach ($ds in $dataSources) {

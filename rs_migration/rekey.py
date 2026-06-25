@@ -25,6 +25,7 @@ encoded here:
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote
 
 from .rest_client import RestClient
 
@@ -34,6 +35,22 @@ _PUT_TYPES = frozenset({"Report", "DataSet"})
 _PATCH_TYPE = "PowerBIReport"
 #: Credential-retrieval mode (canonical casing) that requires stored creds.
 _STORE = "Store"
+
+
+def _odata_path_literal(item_path: str) -> str:
+    """Render ``item_path`` safe for use inside an OData ``Path='...'`` literal.
+
+    Two hardening steps prevent injection (impl-doc credential-integrity fix):
+
+    1. OData-escape internal single quotes by doubling them, so a ``'`` in the
+       path cannot close the string literal and inject trailing OData syntax.
+    2. Percent-encode URL-reserved characters (``'``, ``?``, ``&``, ``#``,
+       space, ...) so they cannot break out of the URL as delimiters. ``/`` is
+       kept literal because catalog paths are slash-delimited and the segment
+       legitimately contains them.
+    """
+    doubled = item_path.replace("'", "''")
+    return quote(doubled, safe="/")
 
 
 def rekey(
@@ -95,7 +112,7 @@ def rekey(
     if data_model_data_source is not None:
         data_source["DataModelDataSource"] = data_model_data_source
 
-    endpoint = f"CatalogItems(Path='{item_path}')/DataSources"
+    endpoint = f"CatalogItems(Path='{_odata_path_literal(item_path)}')/DataSources"
     body = [data_source]
     if is_patch:
         return client.patch(endpoint, json=body)

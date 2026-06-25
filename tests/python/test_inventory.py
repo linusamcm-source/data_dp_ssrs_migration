@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 import requests_mock
 
-from rs_migration.inventory import inventory
+from rs_migration.inventory import _secret_name, inventory
 from rs_migration.rest_client import RestClient
 
 _BASE = "https://pbirs.contoso.com/Reports/api/v2.0/"
@@ -202,6 +202,35 @@ def test_store_match_is_case_insensitive():
             inventory(_client(), "kv-prod")
 
         assert set_secret.call_count == 1
+
+
+# --- secret-name collision resistance (credential-integrity fix) -------------
+
+
+def test_secret_name_distinguishes_inputs_that_collide_after_sanitising():
+    """Two distinct (path, data source) pairs that sanitise to the same stem
+    must NOT produce the same secret name — otherwise set_secret silently
+    overwrites the earlier credential."""
+    # Both '/Sales/Orders' + 'DS' and '/Sales-Orders' + 'DS' collapse to the
+    # same sanitised stem 'Sales-Orders-DS' under the old scheme.
+    a = _secret_name("/Sales/Orders", "DS")
+    b = _secret_name("/Sales-Orders", "DS")
+    assert a != b
+
+
+def test_secret_name_is_deterministic_across_calls():
+    """The same input always yields the same secret name (stable across runs)."""
+    first = _secret_name("/Sales/Orders", "OrdersDB")
+    second = _secret_name("/Sales/Orders", "OrdersDB")
+    assert first == second
+
+
+def test_secret_name_is_key_vault_legal_and_bounded():
+    """The name is alphanumerics + dashes only and within Key Vault's 127-char
+    limit, even for a very long path."""
+    name = _secret_name("/A" * 200, "B" * 200)
+    assert all(c.isalnum() or c == "-" for c in name)
+    assert 0 < len(name) <= 127
 
 
 # --- AC3: returns records with item path, data-source name, credential mode --

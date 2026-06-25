@@ -266,6 +266,52 @@ def test_non_2xx_write_raises_typed_error():
         assert exc.value.status_code == 500
 
 
+def test_error_message_redacts_credential_body_but_keeps_it_on_attribute():
+    """A non-2xx whose body echoes a credential must NOT leak it through the
+    exception message (which gets logged), but the full body is retained on the
+    .body attribute for explicit debugging, and status_code is correct."""
+    client = RestClient("pbirs.contoso.com")
+    leaked_body = '{"CredentialRetrieval": "Store", "Password": "hunter2"}'
+    with requests_mock.Mocker() as m:
+        m.get(
+            "https://pbirs.contoso.com/Reports/api/v2.0/me",
+            cookies={"XSRF-TOKEN": "tok"},
+            json={},
+        )
+        m.put(
+            "https://pbirs.contoso.com/Reports/api/v2.0/CatalogItems(1)",
+            status_code=400,
+            text=leaked_body,
+        )
+        with pytest.raises(RestClientError) as exc:
+            client.put("CatalogItems(1)", json={})
+
+    # The credential must not appear in the (loggable) exception message.
+    assert "hunter2" not in str(exc.value)
+    # But the full body is still available on the attribute for debugging.
+    assert exc.value.body == leaked_body
+    assert "hunter2" in exc.value.body
+    assert exc.value.status_code == 400
+
+
+def test_error_message_includes_truncated_preview_for_safe_long_body():
+    """A long, credential-free body is previewed (truncated) in the message,
+    while the full body is still kept on the .body attribute."""
+    body = "x" * 500  # no 'password'/'secret' -> safe to preview
+    err = RestClientError(404, "https://h/api", body)
+    message = str(err)
+    assert "..." in message
+    assert len(message) < len(body)  # truncated, not echoed in full
+    assert err.body == body  # full body retained
+
+
+def test_error_message_empty_body_is_handled():
+    """An empty body produces a clean message and an empty .body."""
+    err = RestClientError(500, "https://h/api", "")
+    assert str(err).endswith(": ")
+    assert err.body == ""
+
+
 def test_2xx_returns_parsed_json():
     """A 200 GET returns the decoded JSON body."""
     client = RestClient("pbirs.contoso.com")
