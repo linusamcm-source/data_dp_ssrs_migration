@@ -51,9 +51,25 @@ function Export-RsMigrationInventory {
             }
 
             if ($ds.CredentialRetrieval -eq 'Store') {
-                $secretName = Get-RsMigrationSecretName -ItemPath $item.Path -DataSourceName $ds.Name
-                $secretValue = ConvertTo-SecureString -String ([string]$ds.ConnectString) -AsPlainText -Force
-                Set-AzKeyVaultSecret -VaultName $VaultName -Name $secretName -SecretValue $secretValue | Out-Null
+                # Push the STORED PASSWORD (CredentialsInServer.Password) -- the
+                # symmetric-key-protected secret at risk per impl-doc section 9 --
+                # mirroring the Python inventory, NOT the connection string. When a
+                # Store data source carries no stored password there is nothing to
+                # push, so the Key Vault write is skipped (the record is still
+                # emitted), exactly like the Python contract.
+                $password = $null
+                $serverProp = $ds.PSObject.Properties['CredentialsInServer']
+                if ($null -ne $serverProp -and $null -ne $serverProp.Value) {
+                    $passwordProp = $serverProp.Value.PSObject.Properties['Password']
+                    if ($null -ne $passwordProp) {
+                        $password = $passwordProp.Value
+                    }
+                }
+                if (-not [string]::IsNullOrEmpty($password)) {
+                    $secretName = Get-RsMigrationSecretName -ItemPath $item.Path -DataSourceName $ds.Name
+                    $secretValue = ConvertTo-SecureString -String ([string]$password) -AsPlainText -Force
+                    Set-AzKeyVaultSecret -VaultName $VaultName -Name $secretName -SecretValue $secretValue | Out-Null
+                }
             }
 
             $record

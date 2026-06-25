@@ -58,8 +58,10 @@ Describe 'Export-RsMigrationInventory' {
     }
 
     # AC2: for each Store data source, Set-AzKeyVaultSecret is called with a deterministic
-    #      name derived from the item path + data-source name.
-    It 'pushes a Store data source secret to Key Vault with a deterministic name' {
+    #      name derived from the item path + data-source name, pushing the STORED PASSWORD
+    #      (CredentialsInServer.Password) -- the same material the Python inventory pushes
+    #      (impl-doc section 9) -- NOT the connection string.
+    It 'pushes the stored password (not the connection string) to Key Vault under a deterministic name' {
         InModuleScope RsMigration {
             Mock Get-RsRestFolderContent {
                 [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
@@ -69,6 +71,7 @@ Describe 'Export-RsMigrationInventory' {
                     Name                = 'WarehouseDS'
                     CredentialRetrieval = 'Store'
                     ConnectString       = 'Data Source=wh;Initial Catalog=dw'
+                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'wh-p@ss' }
                 }
             }
             Mock Set-AzKeyVaultSecret { }
@@ -78,8 +81,12 @@ Describe 'Export-RsMigrationInventory' {
             # Deterministic name = sanitised path + data-source stem plus an
             # 8-hex SHA256 suffix of the raw string (collision resistance):
             # '/Sales/Orders' + 'WarehouseDS' -> 'Sales-Orders-WarehouseDS-eff4439e'.
+            # The pushed SecureString must decode to the stored PASSWORD, never the ConnectString.
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $VaultName -eq 'rsVault' -and $Name -eq 'Sales-Orders-WarehouseDS-eff4439e'
+                $plain = [System.Net.NetworkCredential]::new('', $SecretValue).Password
+                $VaultName -eq 'rsVault' -and
+                $Name -eq 'Sales-Orders-WarehouseDS-eff4439e' -and
+                $plain -eq 'wh-p@ss'
             }
         }
     }
@@ -92,7 +99,12 @@ Describe 'Export-RsMigrationInventory' {
                 [pscustomobject]@{ Path = '/Finance/Q1'; Type = 'Report' }
             }
             Mock Get-RsRestItemDataSource {
-                [pscustomobject]@{ Name = 'LedgerDS'; CredentialRetrieval = 'Store'; ConnectString = 'cs' }
+                [pscustomobject]@{
+                    Name                = 'LedgerDS'
+                    CredentialRetrieval = 'Store'
+                    ConnectString       = 'cs'
+                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'ledger-pw' }
+                }
             }
             Mock Set-AzKeyVaultSecret { $names.Add($Name) }
 
@@ -227,7 +239,12 @@ Describe 'Export-RsMigrationInventory' {
             Mock Get-RsRestItemDataSource {
                 param($RsItem)
                 if ($RsItem -eq '/Mixed/One') {
-                    [pscustomobject]@{ Name = 'StoreDS'; CredentialRetrieval = 'Store'; ConnectString = 'cs1' }
+                    [pscustomobject]@{
+                        Name                = 'StoreDS'
+                        CredentialRetrieval = 'Store'
+                        ConnectString       = 'cs1'
+                        CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'mixed-pw' }
+                    }
                 }
                 else {
                     [pscustomobject]@{ Name = 'NoneDS'; CredentialRetrieval = 'None'; ConnectString = 'cs2' }
@@ -240,6 +257,61 @@ Describe 'Export-RsMigrationInventory' {
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
                 $Name -eq 'Mixed-One-StoreDS-25827a22'
+            }
+        }
+    }
+
+    # H3 (cross-stack parity): a Store data source with NO stored password is still
+    # inventoried, but nothing is pushed to Key Vault (nothing to push) -- mirroring
+    # the Python inventory, which skips set_secret when CredentialsInServer.Password is absent.
+    It 'records a Store data source with no stored password but does not write it to Key Vault' {
+        InModuleScope RsMigration {
+            Mock Get-RsRestFolderContent {
+                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
+            }
+            Mock Get-RsRestItemDataSource {
+                # Store mode but no CredentialsInServer / Password to push.
+                [pscustomobject]@{ Name = 'EmptyStoreDS'; CredentialRetrieval = 'Store'; ConnectString = 'cs-empty' }
+            }
+            Mock Set-AzKeyVaultSecret { }
+
+            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+
+            @($records).Count | Should -Be 1
+            $records[0].CredentialRetrieval | Should -Be 'Store'
+            # The record still carries the connection string (Story 7 AC3).
+            $records[0].ConnectionString | Should -Be 'cs-empty'
+            # No password -> no Key Vault write.
+            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
+        }
+    }
+
+    # H3: the returned record keeps the connection string even when the PASSWORD is
+    # what gets pushed to Key Vault (the two are distinct: record = ConnectString,
+    # vault payload = CredentialsInServer.Password).
+    It 'keeps the connection string in the record while pushing the password to the vault' {
+        InModuleScope RsMigration {
+            Mock Get-RsRestFolderContent {
+                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
+            }
+            Mock Get-RsRestItemDataSource {
+                [pscustomobject]@{
+                    Name                = 'OrdersDS'
+                    CredentialRetrieval = 'Store'
+                    ConnectString       = 'Data Source=sql1;Initial Catalog=Sales'
+                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'orders-pw' }
+                }
+            }
+            Mock Set-AzKeyVaultSecret { }
+
+            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+
+            @($records).Count | Should -Be 1
+            $records[0].ConnectionString | Should -Be 'Data Source=sql1;Initial Catalog=Sales'
+
+            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
+                $plain = [System.Net.NetworkCredential]::new('', $SecretValue).Password
+                $plain -eq 'orders-pw'
             }
         }
     }
