@@ -62,7 +62,7 @@ try {
     }
 
     if ($analysis) {
-        Write-Host "FAIL: PSScriptAnalyzer returned $($analysis.Count) Error/Warning diagnostic(s):" -ForegroundColor Red
+        Write-Host "FAIL: PSScriptAnalyzer returned $(@($analysis).Count) Error/Warning diagnostic(s):" -ForegroundColor Red
         $analysis | Format-Table -AutoSize RuleName, Severity, ScriptName, Line, Message | Out-Host
         $failed = $true
     }
