@@ -42,5 +42,5 @@ function Restore-RsMigrationKey {
     $password = Get-KeyVaultSecret -VaultName $VaultName -Name $PasswordSecretName
 
     Restore-RsEncryptionKey -ReportServerInstance $ReportServerInstance `
-        -Password $password -KeyPath $KeyPath
+        -Password $password -KeyPath $KeyPath -ErrorAction Stop
 }

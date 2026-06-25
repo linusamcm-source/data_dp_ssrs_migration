@@ -34,9 +34,11 @@ function Set-RsMigrationDatabase {
         return
     }
 
+    # -ErrorAction Stop so a non-terminating Set-RsDatabase failure does not fall
+    # through to restart the service as if the rebind had succeeded.
     Set-RsDatabase -DatabaseServerName $DatabaseServerName -Name $Name -IsExistingDatabase `
         -DatabaseCredentialType $DatabaseCredentialType `
-        -ReportServerInstance 'PBIRS' -ReportServerVersion PowerBIReportServer
+        -ReportServerInstance 'PBIRS' -ReportServerVersion PowerBIReportServer -ErrorAction Stop
 
     # Set-RsDatabase does not restart the report server; the new connection only
     # takes effect after a restart (impl-doc 7.5).

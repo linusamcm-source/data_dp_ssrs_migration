@@ -53,8 +53,10 @@ function Backup-RsMigrationKey {
 
     $password = Get-KeyVaultSecret -VaultName $VaultName -Name $PasswordSecretName
 
-    # If this throws, the function rethrows and Set-AzKeyVaultSecret is never reached.
-    Backup-RsEncryptionKey @splat -Password $password -KeyPath $KeyPath
+    # -ErrorAction Stop makes a non-terminating backup failure terminating, so a
+    # silent failure can never fall through to read a stale .snk and push garbage
+    # to Key Vault. If this throws, Set-AzKeyVaultSecret is never reached.
+    Backup-RsEncryptionKey @splat -Password $password -KeyPath $KeyPath -ErrorAction Stop
 
     # Backup succeeded: read the .snk bytes and push them to Key Vault as base64.
     $bytes = [System.IO.File]::ReadAllBytes($KeyPath)

@@ -135,6 +135,27 @@ Describe 'Backup-RsMigrationKey' {
             Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
         }
     }
+
+    # AC (hardening): a NON-terminating failure from Backup-RsEncryptionKey (the
+    # realistic WMI default) must still abort via -ErrorAction Stop, so a stale
+    # .snk is never base64'd and pushed to Key Vault.
+    It 'does not write to Key Vault when Backup-RsEncryptionKey fails non-terminating' {
+        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
+            param($KeyPath)
+            # Pre-create a stale .snk so a fall-through would read it and push garbage.
+            [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](9, 9, 9))
+            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
+            # Non-terminating failure: the backup writes nothing new and only Write-Errors.
+            Mock Backup-RsEncryptionKey { Write-Error 'WMI BackupEncryptionKey non-terminating failure' }
+            Mock Set-AzKeyVaultSecret { }
+
+            { Backup-RsMigrationKey -KeyPath $KeyPath `
+                    -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk' } |
+                Should -Throw
+
+            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
+        }
+    }
 }
 
 Describe 'Restore-RsMigrationKey' {

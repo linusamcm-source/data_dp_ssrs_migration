@@ -45,8 +45,10 @@ function Backup-RsMigrationDatabase {
     }
     New-RsMigrationBlobCredential @credParams
 
+    # dbatools swallows errors as warnings by default; -EnableException makes a
+    # backup failure terminating so callers (e.g. the runbook) see it and abort.
     Backup-DbaDatabase -SqlInstance $SqlInstance `
         -Database 'ReportServer', 'ReportServerTempDB' `
         -AzureBaseUrl $AzureBaseUrl `
-        -Type Full -CopyOnly -CompressBackup -Checksum
+        -Type Full -CopyOnly -CompressBackup -Checksum -EnableException
 }

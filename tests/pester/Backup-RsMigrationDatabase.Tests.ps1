@@ -97,6 +97,30 @@ Describe 'New-RsMigrationBlobCredential (Private helper)' {
             }
         }
     }
+
+    Context 'missing password' {
+        It 'throws (no credential created) when the SAS model omits -SecurePassword' {
+            InModuleScope RsMigration {
+                Mock New-DbaCredential {}
+                {
+                    New-RsMigrationBlobCredential -SqlInstance 'X' `
+                        -ContainerUrl 'https://x/c' -Model 'SAS'
+                } | Should -Throw '*SAS model requires*'
+                Should -Invoke New-DbaCredential -Times 0 -Exactly
+            }
+        }
+
+        It 'throws (no credential created) when the StorageKey model omits -SecurePassword' {
+            InModuleScope RsMigration {
+                Mock New-DbaCredential {}
+                {
+                    New-RsMigrationBlobCredential -SqlInstance 'X' `
+                        -ContainerUrl 'https://x/c' -Model 'StorageKey'
+                } | Should -Throw '*StorageKey model requires*'
+                Should -Invoke New-DbaCredential -Times 0 -Exactly
+            }
+        }
+    }
 }
 
 Describe 'Backup-RsMigrationDatabase (Public)' {

@@ -48,10 +48,12 @@ function New-RsMigrationBlobCredential {
 
     switch ($Model) {
         'SAS' {
+            if (-not $SecurePassword) { throw "The SAS model requires -SecurePassword (the SAS token)." }
             $params.Identity = 'SHARED ACCESS SIGNATURE'
             $params.SecurePassword = $SecurePassword
         }
         'StorageKey' {
+            if (-not $SecurePassword) { throw "The StorageKey model requires -SecurePassword (the storage access key)." }
             $params.Identity = $ContainerUrl
             $params.SecurePassword = $SecurePassword
         }
@@ -61,5 +63,7 @@ function New-RsMigrationBlobCredential {
         }
     }
 
-    New-DbaCredential @params
+    # dbatools swallows errors as warnings by default; -EnableException makes a
+    # credential-creation failure terminating.
+    New-DbaCredential @params -EnableException
 }

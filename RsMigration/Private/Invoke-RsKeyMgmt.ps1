@@ -6,9 +6,13 @@ function Invoke-RsKeyMgmt {
         mockability seam). Body cannot execute off-Windows; kept minimal.
     #>
     [CmdletBinding()]
+    [OutputType([int])]
     param(
         [string]$ExePath,
         [string[]]$Arguments
     )
     & $ExePath @Arguments
+    # Return the exit code so callers do not depend on the ambient
+    # $LASTEXITCODE, which throws under Set-StrictMode if never set.
+    return $LASTEXITCODE
 }

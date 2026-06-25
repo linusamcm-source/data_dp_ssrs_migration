@@ -31,13 +31,18 @@ function Reset-RsMigrationEncryptedContent {
 
     $exePath = "C:\Program Files\Microsoft SQL Server\$SqlMajorVersion.PBIRS\Reporting Services\ReportServer\bin\rskeymgmt.exe"
 
-    if (-not ($Force -or $PSCmdlet.ShouldProcess($exePath, 'Destroy encrypted content (rskeymgmt.exe -d)'))) {
+    # -Force suppresses the confirmation prompt but must NOT defeat -WhatIf:
+    # ShouldProcess still returns $false under -WhatIf (WhatIf wins over
+    # ConfirmPreference), so a -WhatIf run never destroys, even with -Force.
+    if ($Force) { $ConfirmPreference = 'None' }
+
+    if (-not $PSCmdlet.ShouldProcess($exePath, 'Destroy encrypted content (rskeymgmt.exe -d)')) {
         return
     }
 
-    Invoke-RsKeyMgmt -ExePath $exePath -Arguments @('-d')
+    $exitCode = Invoke-RsKeyMgmt -ExePath $exePath -Arguments @('-d')
 
-    if ($LASTEXITCODE -ne 0) {
-        throw "rskeymgmt.exe -d failed with exit code $LASTEXITCODE."
+    if ($exitCode -ne 0) {
+        throw "rskeymgmt.exe -d failed with exit code $exitCode."
     }
 }
