@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rs-migration"
+version = "0.1.0"
+description = "SSRS to PBIRS migration orchestrator (Python side)."
+requires-python = ">=3.10"
+dependencies = [
+    "azure-keyvault-secrets",
+    "azure-identity",
+    "requests",
+    "requests_ntlm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "ruff",
+    "requests-mock",
+]
+
+[project.scripts]
+rs-migration = "rs_migration.runbook:main"
+
+[tool.setuptools]
+packages = ["rs_migration"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+addopts = "-ra"
