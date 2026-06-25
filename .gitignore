@@ -7,3 +7,5 @@ coverage.xml
 .coverage
 *.egg-info/
 __pycache__/
+docs/
+team-sprint.config.yaml
