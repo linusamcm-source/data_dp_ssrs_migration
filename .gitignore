@@ -4,3 +4,6 @@ docs
 .venv/
 .team-sprint/
 coverage.xml
+.coverage
+*.egg-info/
+__pycache__/
