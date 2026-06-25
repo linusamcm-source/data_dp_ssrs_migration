@@ -22,6 +22,9 @@ dev = [
     "requests-mock",
 ]
 
+[project.scripts]
+rs-migration = "rs_migration.runbook:main"
+
 [tool.setuptools]
 packages = ["rs_migration"]
 
