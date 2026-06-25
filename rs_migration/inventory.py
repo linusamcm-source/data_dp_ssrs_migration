@@ -16,10 +16,16 @@ inventory of catalog credential modes.
 
 from __future__ import annotations
 
+import hashlib
 import re
 
 from rs_migration import keyvault
 from rs_migration.rest_client import RestClient
+
+#: Key Vault secret names are capped at 127 characters; reserve room for the
+#: ``-<8 hex>`` collision-resistance suffix so the whole name stays legal.
+_MAX_SECRET_NAME = 127
+_SUFFIX_LEN = 9  # one dash + 8 hex characters
 
 #: Catalog enumeration endpoint (relative to the client base URL).
 _CATALOG_ENDPOINT = "CatalogItems"
@@ -36,13 +42,22 @@ def _datasources_endpoint(item_id: str) -> str:
 def _secret_name(item_path: str, data_source: str) -> str:
     """Derive a Key Vault secret name from the item path + data-source name.
 
-    Key Vault secret names allow only alphanumerics and dashes, so every other
-    character (slashes, spaces, backslashes) collapses to a dash and runs of
-    dashes are squeezed.
+    Key Vault secret names allow only alphanumerics and dashes, so the
+    human-readable stem collapses every other character (slashes, spaces,
+    backslashes) to a dash and squeezes runs of dashes. Because that
+    sanitisation is lossy — ``/Sales/Orders`` and ``/Sales-Orders`` both
+    collapse to ``Sales-Orders`` — a short, collision-resistant suffix derived
+    from the *unsanitised* raw string is appended so distinct items never
+    collide (and ``set_secret`` never silently overwrites another credential).
+
+    The mapping is pure: the same inputs always yield the same name.
     """
     raw = f"{item_path}-{data_source}"
-    name = re.sub(r"[^A-Za-z0-9]+", "-", raw)
-    return name.strip("-")
+    suffix = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+    stem = re.sub(r"[^A-Za-z0-9]+", "-", raw).strip("-")
+    # Keep room for the "-<8 hex>" suffix within the 127-char Key Vault limit.
+    stem = stem[: _MAX_SECRET_NAME - _SUFFIX_LEN].strip("-")
+    return f"{stem}-{suffix}" if stem else suffix
 
 
 def _stored_password(data_source: dict) -> str | None:

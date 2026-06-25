@@ -75,10 +75,11 @@ Describe 'Export-RsMigrationInventory' {
 
             Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
 
-            # Deterministic name = path + data-source name, sanitised to a Key Vault secret name
-            # (alphanumeric + dashes only): '/Sales/Orders' + 'WarehouseDS' -> 'Sales-Orders-WarehouseDS'.
+            # Deterministic name = sanitised path + data-source stem plus an
+            # 8-hex SHA256 suffix of the raw string (collision resistance):
+            # '/Sales/Orders' + 'WarehouseDS' -> 'Sales-Orders-WarehouseDS-eff4439e'.
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $VaultName -eq 'rsVault' -and $Name -eq 'Sales-Orders-WarehouseDS'
+                $VaultName -eq 'rsVault' -and $Name -eq 'Sales-Orders-WarehouseDS-eff4439e'
             }
         }
     }
@@ -100,7 +101,43 @@ Describe 'Export-RsMigrationInventory' {
 
             $names.Count | Should -Be 2
             $names[0] | Should -Be $names[1]
-            $names[0] | Should -Be 'Finance-Q1-LedgerDS'
+            $names[0] | Should -Be 'Finance-Q1-LedgerDS-7a311fa9'
+        }
+    }
+
+    # Collision resistance: two distinct inputs that sanitise to the same stem
+    # ('/Sales/Orders'+'DS' and '/Sales-Orders'+'DS' both -> 'Sales-Orders-DS')
+    # must yield DIFFERENT secret names so Set-AzKeyVaultSecret cannot silently
+    # overwrite one credential with another. The name is also deterministic.
+    It 'gives distinct secret names to inputs that collide after sanitising and stays deterministic' {
+        InModuleScope RsMigration {
+            $a1 = Get-RsMigrationSecretName -ItemPath '/Sales/Orders' -DataSourceName 'DS'
+            $a2 = Get-RsMigrationSecretName -ItemPath '/Sales/Orders' -DataSourceName 'DS'
+            $b = Get-RsMigrationSecretName -ItemPath '/Sales-Orders' -DataSourceName 'DS'
+
+            # Deterministic: same input -> same name.
+            $a1 | Should -Be $a2
+            # Collision-resistant: distinct raw inputs -> distinct names.
+            $a1 | Should -Not -Be $b
+            # Still Key-Vault-legal (alphanumerics + dashes only).
+            $a1 | Should -Match '^[A-Za-z0-9-]+$'
+            $b | Should -Match '^[A-Za-z0-9-]+$'
+        }
+    }
+
+    # Bounds + fallback: a very long input is truncated to stay within Key
+    # Vault's 127-char limit, and an input with no alphanumerics still yields a
+    # legal (hash-only) name.
+    It 'keeps the secret name Key-Vault-legal and bounded for long and empty stems' {
+        InModuleScope RsMigration {
+            $long = Get-RsMigrationSecretName -ItemPath ('/A' * 200) -DataSourceName ('B' * 200)
+            $long.Length | Should -BeLessOrEqual 127
+            $long | Should -Match '^[A-Za-z0-9-]+$'
+
+            # '/' + '/' sanitises to an empty stem, so only the hash suffix remains.
+            $empty = Get-RsMigrationSecretName -ItemPath '/' -DataSourceName '/'
+            $empty | Should -Match '^[A-Za-z0-9]+$'
+            $empty.Length | Should -Be 8
         }
     }
 
@@ -202,7 +239,7 @@ Describe 'Export-RsMigrationInventory' {
 
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly
             Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'Mixed-One-StoreDS'
+                $Name -eq 'Mixed-One-StoreDS-25827a22'
             }
         }
     }
