@@ -14,7 +14,7 @@ REM
 REM  USAGE:  run.bat <command> [extra args...]
 REM
 REM  COMMANDS:
-REM    setup       Create .venv and install the package + dev tools (-e .[dev]).
+REM    setup       Create .venv + install package + dev tools via uv (pip fallback).
 REM    test        Run BOTH quality gates (Python then PowerShell).
 REM    test-py     Python gate: pytest with >=90% coverage, then ruff lint.
 REM    test-ps     PowerShell gate: Pester (>=90% coverage) + PSScriptAnalyzer.
@@ -76,7 +76,7 @@ echo SSRS -^> PBIRS migration toolkit - run.bat
 echo.
 echo Usage:  run.bat ^<command^> [extra args...]
 echo.
-echo   setup     Create .venv and install the package + dev tools.
+echo   setup     Create .venv + install package + dev tools (uv; pip fallback).
 echo   test      Run BOTH quality gates (Python then PowerShell).
 echo   test-py   Python gate: pytest ^>=90%% coverage + ruff.
 echo   test-ps   PowerShell gate: Pester ^>=90%% coverage + PSScriptAnalyzer.
@@ -96,12 +96,21 @@ echo [run] setup complete.
 exit /b 0
 
 :setup_impl
-echo [run] Bootstrapping Python virtualenv in %VENV% ...
+where uv >nul 2>nul && goto :setup_uv
+echo [run] uv not found - falling back to python -m venv + pip.
 if not exist "%PY%" (
     python -m venv %VENV% || exit /b 1
 )
 "%PY%" -m pip install -q --upgrade pip || exit /b 1
 "%PY%" -m pip install -q -e ".[dev]" || exit /b 1
+exit /b 0
+
+:setup_uv
+echo [run] Bootstrapping venv with uv in %VENV% ...
+if not exist "%PY%" (
+    uv venv %VENV% || exit /b 1
+)
+uv pip install -e ".[dev]" || exit /b 1
 exit /b 0
 
 REM ===========================================================================

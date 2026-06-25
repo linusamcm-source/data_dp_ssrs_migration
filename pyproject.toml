@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
-name = "rs-migration"
-version = "0.1.0"
+name = "data-dp-ssrs-migration"
+dynamic = ["version"]
 description = "SSRS to PBIRS migration orchestrator (Python side)."
 requires-python = ">=3.10"
 dependencies = [
@@ -25,7 +25,13 @@ dev = [
 [project.scripts]
 rs-migration = "rs_migration.runbook:main"
 
-[tool.setuptools]
+# Single source of truth: rs_migration/__init__.py:__version__
+# Hatchling reads it for the dynamic project version and `hatch version
+# <segment>` bumps the same attribute in place.
+[tool.hatch.version]
+path = "rs_migration/__init__.py"
+
+[tool.hatch.build.targets.wheel]
 packages = ["rs_migration"]
 
 [tool.ruff]

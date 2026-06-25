@@ -25,6 +25,9 @@ validation) and performs **zero** mutating subprocess or SQL calls.
 ## Prerequisites
 
 - **Python 3.10+** (the orchestrator and its tests).
+- **[uv](https://docs.astral.sh/uv/)** (recommended) — fast venv + dependency
+  installer used by `run.bat setup` and `just qg-py` for the build. Both fall back
+  to `python -m venv` + `pip` when `uv` is not on `PATH`.
 - **PowerShell 7+** (`pwsh`) — runs the wrapper cmdlets and the PowerShell gate.
 - PowerShell modules for a real migration: `ReportingServicesTools`, `dbatools`,
   `Az.KeyVault` (see `RsMigration/RsMigration.psd1`).
@@ -51,8 +54,14 @@ run.bat dry-run
 run.bat migrate
 ```
 
-On macOS/Linux there is no `run.bat`; use `just` (below) and the `rs-migration`
-CLI directly.
+On macOS/Linux there is no `run.bat`; bootstrap the build with **uv**, then use
+`just` (below) and the `rs-migration` CLI directly:
+
+```bash
+uv venv                        # create .venv (Python 3.10+)
+uv pip install -e ".[dev]"     # install the package + dev tools
+uv run rs-migration --dry-run  # or: .venv/bin/rs-migration --dry-run
+```
 
 ---
 
@@ -102,7 +111,7 @@ run.bat <command> [extra args...]
 
 | Command | What it does |
 |---------|--------------|
-| `setup` | Create `.venv` and install the package + dev tools (`pip install -e .[dev]`). |
+| `setup` | Create `.venv` and install the package + dev tools — uses **uv** (`uv venv` + `uv pip install -e .[dev]`), falling back to `python -m venv` + `pip` when `uv` is absent. |
 | `test` | Run **both** quality gates: Python then PowerShell. |
 | `test-py` | Python gate: `pytest` with ≥ 90 % coverage, then `ruff` lint. |
 | `test-ps` | PowerShell gate: Pester (≥ 90 % coverage) + PSScriptAnalyzer. |
@@ -122,13 +131,13 @@ run.bat dry-run --server staging-pbirs.contoso.com
 ### `just` (cross-platform quality gates)
 
 ```
-just qg-py     # Python gate: bootstraps .venv, pytest ≥90% coverage + ruff
+just qg-py     # Python gate: bootstraps .venv via uv (pip fallback), pytest ≥90% coverage + ruff
 just qg-ps     # PowerShell gate: pwsh -File scripts/qg-ps.ps1
 ```
 
 ### `rs-migration` CLI (direct)
 
-After `run.bat setup` (or `pip install -e .[dev]`):
+After `run.bat setup` (or `uv pip install -e ".[dev]"`):
 
 ```bash
 rs-migration --help          # full flag list (each flag shows its [env: RS_*])
@@ -181,14 +190,27 @@ run.bat test-ps     :: PowerShell only
 just qg-py          # Python gate (any OS)
 just qg-ps          # PowerShell gate (any OS with pwsh)
 
-# Or run the Python tests directly inside the venv:
-.venv/bin/python -m pytest --cov=rs_migration --cov-fail-under=90 tests/python
-.venv/bin/ruff check rs_migration tests/python
+# Or run the Python tests directly via uv (resolves/creates the project venv):
+uv run pytest --cov=rs_migration --cov-fail-under=90 tests/python
+uv run ruff check rs_migration tests/python
 ```
 
 - Python tests: `tests/python/` (`pytest` + `pytest-cov`, mocks the REST wire,
   Key Vault, and the `pwsh` subprocess boundary).
 - PowerShell tests: `tests/pester/` (Pester 5), gated by `scripts/qg-ps.ps1`.
+
+---
+
+## Versioning
+
+The build backend is **Hatchling**, and the version is single-sourced from
+`rs_migration/__init__.py` (`__version__`) via `[tool.hatch.version]`. Bump it
+with `hatch` (run ephemerally through uv — no global install needed):
+
+```bash
+uvx hatch version patch     # 0.1.1 → 0.1.2   (also: minor, major)
+uv pip install -e ".[dev]"  # refresh the editable install's metadata
+```
 
 ---
 
@@ -205,7 +227,8 @@ rs_migration/        Python orchestrator + REST client
 RsMigration/         PowerShell module (Public/ cmdlets, Private/ helpers)
 scripts/qg-ps.ps1    PowerShell quality gate
 tests/               python/ (pytest) and pester/ (Pester) suites
-justfile             qg-py / qg-ps recipes
+pyproject.toml       Hatchling build + dynamic version (rs_migration.__version__)
+justfile             qg-py / qg-ps recipes (uv-bootstrapped)
 .env.example         Configuration template (copy to .env)
 run.bat              Windows task runner (setup / test / dry-run / migrate / clean)
 ```
