@@ -1,0 +1,38 @@
+# team-sprint config — SSRS→PBIRS migration toolkit
+# Mixed-stack repo: PowerShell module (RsMigration/) + Python package (rs_migration/).
+# team-sprint assumes one stack; the command wiring below adapts it to two.
+
+plan_path: docs/plans/ssrs-pbirs-toolkit-1.md
+target_branch: develop
+coverage_threshold: 80
+coverage_mode: new
+
+# --- Stack-aware commands -------------------------------------------------
+# Worktrees are ephemeral siblings, so qg-py self-bootstraps a .venv.
+# PowerShell modules (Pester/PSScriptAnalyzer/RS modules) are installed
+# CurrentUser-scope, hence visible in every worktree without per-tree setup.
+commands:
+  # No separate typecheck step — ruff + PSScriptAnalyzer are the static gates,
+  # run inside the test command. `true` is a no-op exiting 0.
+  typecheck: "true"
+  lint: "true"
+  # Stack-aware: run whichever gate applies to what exists in the worktree.
+  # Greenfield-safe and order-independent (Story 1 and Story 10 are roots).
+  test: "bash -c 'set -e; if [ -d RsMigration ]; then just qg-ps; fi; if [ -d rs_migration ]; then just qg-py; fi'"
+  # External coverage gate DISABLED: one format-autodetecting gate cannot
+  # measure both Pester (JaCoCo) and pytest-cov (cobertura) at the same
+  # coverage.xml path. 80% is enforced INSIDE the qg recipes instead.
+  coverage: "true"
+
+# --- Fleet ----------------------------------------------------------------
+# crew:off — mixed stack, no single language crew. general-purpose handles
+# both PowerShell and Python (no powershell-specialist agent exists).
+crew: off
+engineer_agent: general-purpose
+test_writer_agent: general-purpose
+
+# --- Knobs ----------------------------------------------------------------
+graphify: off            # greenfield; repomix is enough for recon here
+push_on_merge: false
+adversarial_iterations: 3
+review_fix_iterations: 3
