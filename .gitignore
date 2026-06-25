@@ -3,3 +3,4 @@ docs
 .claude/repomix/
 .venv/
 .team-sprint/
+coverage.xml
