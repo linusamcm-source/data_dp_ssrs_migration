@@ -5,16 +5,38 @@ param()
 BeforeAll {
     $script:ModuleRoot = Join-Path $PSScriptRoot '..' '..' 'RsMigration'
     Import-Module (Join-Path $script:ModuleRoot 'RsMigration.psd1') -Force
+
+    # Source artefact PS2 rewrites - used by the static source-contract assertions
+    # below. After PS2 the cmdlet stops writing secrets, so "no Key Vault push"
+    # can only be proven by grepping the source (a removed/absent cmdlet cannot be
+    # mocked for Should -Invoke), exactly as PS1 proved its own decommission.
+    $script:InventorySource = Join-Path $script:ModuleRoot 'Public' 'Export-RsMigrationInventory.ps1'
 }
 
 AfterAll {
     Remove-Module RsMigration -Force -ErrorAction SilentlyContinue
 }
 
+Describe 'Export-RsMigrationInventory parameter contract' {
+    # AC1: the Key Vault push is decommissioned, so -VaultName is gone entirely.
+    It 'no longer exposes the -VaultName parameter' {
+        $keys = (Get-Command Export-RsMigrationInventory).Parameters.Keys
+        $keys | Should -Not -Contain 'VaultName'
+    }
+
+    # The REST catalog walk still needs the portal URI (RsFolder stays optional);
+    # REST access uses the RS cmdlets' default current-user credentials.
+    It 'still exposes -ReportPortalUri and -RsFolder' {
+        $keys = (Get-Command Export-RsMigrationInventory).Parameters.Keys
+        $keys | Should -Contain 'ReportPortalUri'
+        $keys | Should -Contain 'RsFolder'
+    }
+}
+
 Describe 'Export-RsMigrationInventory' {
 
-    # AC1: enumerates catalog items via Get-RsRestFolderContent (recursively) and calls
-    #      Get-RsRestItemDataSource once per item.
+    # AC3: enumerates catalog items via Get-RsRestFolderContent (recursively) and reads
+    #      each item's data sources once via Get-RsRestItemDataSource.
     It 'enumerates items via Get-RsRestFolderContent and reads data sources once per item' {
         InModuleScope RsMigration {
             Mock Get-RsRestFolderContent {
@@ -29,16 +51,15 @@ Describe 'Export-RsMigrationInventory' {
                     ConnectString       = 'Data Source=db1;Initial Catalog=sales'
                 }
             }
-            Mock Set-AzKeyVaultSecret { }
 
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             Should -Invoke Get-RsRestFolderContent -Times 1 -Exactly -ParameterFilter { $Recurse }
             Should -Invoke Get-RsRestItemDataSource -Times 3 -Exactly
         }
     }
 
-    # AC1 (per-item targeting): each item's path is forwarded to Get-RsRestItemDataSource.
+    # AC3 (per-item targeting): each item's path is forwarded to Get-RsRestItemDataSource.
     It 'forwards each item path to Get-RsRestItemDataSource' {
         InModuleScope RsMigration {
             Mock Get-RsRestFolderContent {
@@ -47,9 +68,8 @@ Describe 'Export-RsMigrationInventory' {
             Mock Get-RsRestItemDataSource {
                 [pscustomobject]@{ Name = 'DS1'; CredentialRetrieval = 'None'; ConnectString = 'cs' }
             }
-            Mock Set-AzKeyVaultSecret { }
 
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             Should -Invoke Get-RsRestItemDataSource -Times 1 -Exactly -ParameterFilter {
                 $RsItem -eq '/Sales/Orders'
@@ -57,103 +77,7 @@ Describe 'Export-RsMigrationInventory' {
         }
     }
 
-    # AC2: for each Store data source, Set-AzKeyVaultSecret is called with a deterministic
-    #      name derived from the item path + data-source name, pushing the STORED PASSWORD
-    #      (CredentialsInServer.Password) -- the same material the Python inventory pushes
-    #      (impl-doc section 9) -- NOT the connection string.
-    It 'pushes the stored password (not the connection string) to Key Vault under a deterministic name' {
-        InModuleScope RsMigration {
-            Mock Get-RsRestFolderContent {
-                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
-            }
-            Mock Get-RsRestItemDataSource {
-                [pscustomobject]@{
-                    Name                = 'WarehouseDS'
-                    CredentialRetrieval = 'Store'
-                    ConnectString       = 'Data Source=wh;Initial Catalog=dw'
-                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'wh-p@ss' }
-                }
-            }
-            Mock Set-AzKeyVaultSecret { }
-
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-
-            # Deterministic name = sanitised path + data-source stem plus an
-            # 8-hex SHA256 suffix of the raw string (collision resistance):
-            # '/Sales/Orders' + 'WarehouseDS' -> 'Sales-Orders-WarehouseDS-eff4439e'.
-            # The pushed SecureString must decode to the stored PASSWORD, never the ConnectString.
-            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $plain = [System.Net.NetworkCredential]::new('', $SecretValue).Password
-                $VaultName -eq 'rsVault' -and
-                $Name -eq 'Sales-Orders-WarehouseDS-eff4439e' -and
-                $plain -eq 'wh-p@ss'
-            }
-        }
-    }
-
-    # AC2: the deterministic name is stable across runs for the same path + data-source name.
-    It 'derives the same secret name deterministically for the same item path and data source' {
-        InModuleScope RsMigration {
-            $names = [System.Collections.Generic.List[string]]::new()
-            Mock Get-RsRestFolderContent {
-                [pscustomobject]@{ Path = '/Finance/Q1'; Type = 'Report' }
-            }
-            Mock Get-RsRestItemDataSource {
-                [pscustomobject]@{
-                    Name                = 'LedgerDS'
-                    CredentialRetrieval = 'Store'
-                    ConnectString       = 'cs'
-                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'ledger-pw' }
-                }
-            }
-            Mock Set-AzKeyVaultSecret { $names.Add($Name) }
-
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-
-            $names.Count | Should -Be 2
-            $names[0] | Should -Be $names[1]
-            $names[0] | Should -Be 'Finance-Q1-LedgerDS-7a311fa9'
-        }
-    }
-
-    # Collision resistance: two distinct inputs that sanitise to the same stem
-    # ('/Sales/Orders'+'DS' and '/Sales-Orders'+'DS' both -> 'Sales-Orders-DS')
-    # must yield DIFFERENT secret names so Set-AzKeyVaultSecret cannot silently
-    # overwrite one credential with another. The name is also deterministic.
-    It 'gives distinct secret names to inputs that collide after sanitising and stays deterministic' {
-        InModuleScope RsMigration {
-            $a1 = Get-RsMigrationSecretName -ItemPath '/Sales/Orders' -DataSourceName 'DS'
-            $a2 = Get-RsMigrationSecretName -ItemPath '/Sales/Orders' -DataSourceName 'DS'
-            $b = Get-RsMigrationSecretName -ItemPath '/Sales-Orders' -DataSourceName 'DS'
-
-            # Deterministic: same input -> same name.
-            $a1 | Should -Be $a2
-            # Collision-resistant: distinct raw inputs -> distinct names.
-            $a1 | Should -Not -Be $b
-            # Still Key-Vault-legal (alphanumerics + dashes only).
-            $a1 | Should -Match '^[A-Za-z0-9-]+$'
-            $b | Should -Match '^[A-Za-z0-9-]+$'
-        }
-    }
-
-    # Bounds + fallback: a very long input is truncated to stay within Key
-    # Vault's 127-char limit, and an input with no alphanumerics still yields a
-    # legal (hash-only) name.
-    It 'keeps the secret name Key-Vault-legal and bounded for long and empty stems' {
-        InModuleScope RsMigration {
-            $long = Get-RsMigrationSecretName -ItemPath ('/A' * 200) -DataSourceName ('B' * 200)
-            $long.Length | Should -BeLessOrEqual 127
-            $long | Should -Match '^[A-Za-z0-9-]+$'
-
-            # '/' + '/' sanitises to an empty stem, so only the hash suffix remains.
-            $empty = Get-RsMigrationSecretName -ItemPath '/' -DataSourceName '/'
-            $empty | Should -Match '^[A-Za-z0-9]+$'
-            $empty.Length | Should -Be 8
-        }
-    }
-
-    # AC3: returns a structured inventory record per data source with item path,
+    # AC3: emits one inventory REPORT record per data source carrying item path,
     #      data-source name, CredentialRetrieval, and connection string.
     It 'returns a structured record per data source with path, name, retrieval mode and connection string' {
         InModuleScope RsMigration {
@@ -170,9 +94,8 @@ Describe 'Export-RsMigrationInventory' {
                     [pscustomobject]@{ Name = 'ExecDS'; CredentialRetrieval = 'Integrated'; ConnectString = 'cs-exec' }
                 }
             }
-            Mock Set-AzKeyVaultSecret { }
 
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             @($records).Count | Should -Be 2
 
@@ -198,9 +121,8 @@ Describe 'Export-RsMigrationInventory' {
                 [pscustomobject]@{ Name = 'DsA'; CredentialRetrieval = 'Store'; ConnectString = 'a' }
                 [pscustomobject]@{ Name = 'DsB'; CredentialRetrieval = 'Prompt'; ConnectString = 'b' }
             }
-            Mock Set-AzKeyVaultSecret { }
 
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             @($records).Count | Should -Be 2
             ($records | Where-Object DataSourceName -EQ 'DsA').ItemPath | Should -Be '/Multi/Report'
@@ -208,9 +130,88 @@ Describe 'Export-RsMigrationInventory' {
         }
     }
 
-    # AC4: a non-Store data source IS included in the returned inventory but produces NO
-    #      Set-AzKeyVaultSecret call.
-    It 'includes a non-Store data source in the inventory but does not write it to Key Vault' {
+    # AC3 + AC4: a stored-credential data source is REPORTED (so the operator knows a
+    #            credential must be re-entered out of band) but the cmdlet NEVER emits
+    #            the password - no Password property and no plaintext leak in any field.
+    It 'reports a stored-credential data source without ever emitting the password' {
+        InModuleScope RsMigration {
+            Mock Get-RsRestFolderContent {
+                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
+            }
+            Mock Get-RsRestItemDataSource {
+                [pscustomobject]@{
+                    Name                = 'WarehouseDS'
+                    CredentialRetrieval = 'Store'
+                    ConnectString       = 'Data Source=wh;Initial Catalog=dw'
+                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'wh-p@ss' }
+                }
+            }
+
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
+
+            @($records).Count | Should -Be 1
+            $record = @($records)[0]
+
+            # The report carries the inventory fields the operator needs...
+            $names = $record.PSObject.Properties.Name
+            $names | Should -Contain 'ItemPath'
+            $names | Should -Contain 'DataSourceName'
+            $names | Should -Contain 'CredentialRetrieval'
+            $record.CredentialRetrieval | Should -Be 'Store'
+
+            # ...but never the secret: no Password property and no plaintext password
+            # value anywhere in the emitted record.
+            $names | Should -Not -Contain 'Password'
+            $allValues = ($record.PSObject.Properties | ForEach-Object { [string]$_.Value }) -join "`n"
+            $allValues | Should -Not -Match ([regex]::Escape('wh-p@ss'))
+        }
+    }
+
+    # AC4 (regression): connection strings can themselves embed credentials
+    #      (Password=/Pwd=). Because the inventory report is persisted to a fileshare,
+    #      such a secret would otherwise leak at rest, contradicting the "NEVER emits a
+    #      password" guarantee. The credential token must be masked before emission while
+    #      every non-credential key=value pair is preserved verbatim.
+    It 'masks credentials embedded in the connection string while preserving non-secret pairs' {
+        InModuleScope RsMigration {
+            Mock Get-RsRestFolderContent {
+                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
+            }
+            Mock Get-RsRestItemDataSource {
+                [pscustomobject]@{
+                    Name                = 'PasswordDS'
+                    CredentialRetrieval = 'Store'
+                    ConnectString       = 'Server=db;Database=Sales;User ID=svc;Password=SuperSecret123;'
+                }
+                [pscustomobject]@{
+                    Name                = 'PwdDS'
+                    CredentialRetrieval = 'Store'
+                    ConnectString       = 'Server=db2;Database=Mktg;Uid=svc2;Pwd=SuperSecret123'
+                }
+            }
+
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
+
+            @($records).Count | Should -Be 2
+
+            $password = $records | Where-Object DataSourceName -EQ 'PasswordDS'
+            $password.ConnectionString | Should -Not -Match ([regex]::Escape('SuperSecret123'))
+            $password.ConnectionString | Should -Match 'Password=\*\*\*'
+            $password.ConnectionString | Should -Match ([regex]::Escape('Server=db'))
+            $password.ConnectionString | Should -Match ([regex]::Escape('Database=Sales'))
+            $password.ConnectionString | Should -Match ([regex]::Escape('User ID=svc'))
+
+            # The 'Pwd=' spelling is masked too, and its non-secret pairs survive.
+            $pwdRecord = $records | Where-Object DataSourceName -EQ 'PwdDS'
+            $pwdRecord.ConnectionString | Should -Not -Match ([regex]::Escape('SuperSecret123'))
+            $pwdRecord.ConnectionString | Should -Match 'Pwd=\*\*\*'
+            $pwdRecord.ConnectionString | Should -Match ([regex]::Escape('Server=db2'))
+            $pwdRecord.ConnectionString | Should -Match ([regex]::Escape('Database=Mktg'))
+        }
+    }
+
+    # AC3: a non-Store data source is included in the inventory report just like any other.
+    It 'includes a non-Store data source in the inventory report' {
         InModuleScope RsMigration {
             Mock Get-RsRestFolderContent {
                 [pscustomobject]@{ Path = '/Sales/Exec'; Type = 'PowerBIReport' }
@@ -218,117 +219,47 @@ Describe 'Export-RsMigrationInventory' {
             Mock Get-RsRestItemDataSource {
                 [pscustomobject]@{ Name = 'IntegratedDS'; CredentialRetrieval = 'Integrated'; ConnectString = 'cs' }
             }
-            Mock Set-AzKeyVaultSecret { }
 
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             @($records).Count | Should -Be 1
             $records[0].CredentialRetrieval | Should -Be 'Integrated'
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
+            $records[0].PSObject.Properties.Name | Should -Not -Contain 'Password'
         }
     }
 
-    # AC2 + AC4 mixed: only the Store data sources are pushed; non-Store ones are skipped.
-    It 'pushes only the Store data sources to Key Vault in a mixed set' {
-        InModuleScope RsMigration {
-            Mock Get-RsRestFolderContent {
-                [pscustomobject]@{ Path = '/Mixed/One'; Type = 'Report' }
-                [pscustomobject]@{ Path = '/Mixed/Two'; Type = 'Report' }
-            }
-            Mock Get-RsRestItemDataSource {
-                param($RsItem)
-                if ($RsItem -eq '/Mixed/One') {
-                    [pscustomobject]@{
-                        Name                = 'StoreDS'
-                        CredentialRetrieval = 'Store'
-                        ConnectString       = 'cs1'
-                        CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'mixed-pw' }
-                    }
-                }
-                else {
-                    [pscustomobject]@{ Name = 'NoneDS'; CredentialRetrieval = 'None'; ConnectString = 'cs2' }
-                }
-            }
-            Mock Set-AzKeyVaultSecret { }
-
-            Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly
-            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $Name -eq 'Mixed-One-StoreDS-25827a22'
-            }
-        }
-    }
-
-    # H3 (cross-stack parity): a Store data source with NO stored password is still
-    # inventoried, but nothing is pushed to Key Vault (nothing to push) -- mirroring
-    # the Python inventory, which skips set_secret when CredentialsInServer.Password is absent.
-    It 'records a Store data source with no stored password but does not write it to Key Vault' {
-        InModuleScope RsMigration {
-            Mock Get-RsRestFolderContent {
-                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
-            }
-            Mock Get-RsRestItemDataSource {
-                # Store mode but no CredentialsInServer / Password to push.
-                [pscustomobject]@{ Name = 'EmptyStoreDS'; CredentialRetrieval = 'Store'; ConnectString = 'cs-empty' }
-            }
-            Mock Set-AzKeyVaultSecret { }
-
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-
-            @($records).Count | Should -Be 1
-            $records[0].CredentialRetrieval | Should -Be 'Store'
-            # The record still carries the connection string (Story 7 AC3).
-            $records[0].ConnectionString | Should -Be 'cs-empty'
-            # No password -> no Key Vault write.
-            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
-        }
-    }
-
-    # H3: the returned record keeps the connection string even when the PASSWORD is
-    # what gets pushed to Key Vault (the two are distinct: record = ConnectString,
-    # vault payload = CredentialsInServer.Password).
-    It 'keeps the connection string in the record while pushing the password to the vault' {
-        InModuleScope RsMigration {
-            Mock Get-RsRestFolderContent {
-                [pscustomobject]@{ Path = '/Sales/Orders'; Type = 'Report' }
-            }
-            Mock Get-RsRestItemDataSource {
-                [pscustomobject]@{
-                    Name                = 'OrdersDS'
-                    CredentialRetrieval = 'Store'
-                    ConnectString       = 'Data Source=sql1;Initial Catalog=Sales'
-                    CredentialsInServer = [pscustomobject]@{ UserName = 'dom\svc'; Password = 'orders-pw' }
-                }
-            }
-            Mock Set-AzKeyVaultSecret { }
-
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
-
-            @($records).Count | Should -Be 1
-            $records[0].ConnectionString | Should -Be 'Data Source=sql1;Initial Catalog=Sales'
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $plain = [System.Net.NetworkCredential]::new('', $SecretValue).Password
-                $plain -eq 'orders-pw'
-            }
-        }
-    }
-
-    # An item with no data sources contributes no records and no Key Vault calls.
+    # An item with no data sources contributes no records.
     It 'contributes no records for an item that has no data sources' {
         InModuleScope RsMigration {
             Mock Get-RsRestFolderContent {
                 [pscustomobject]@{ Path = '/Empty/Item'; Type = 'Report' }
             }
             Mock Get-RsRestItemDataSource { }
-            Mock Set-AzKeyVaultSecret { }
 
-            $records = Export-RsMigrationInventory -VaultName 'rsVault' -ReportPortalUri 'https://target/reports'
+            $records = Export-RsMigrationInventory -ReportPortalUri 'https://target/reports'
 
             @($records).Count | Should -Be 0
-            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
         }
+    }
+}
+
+Describe 'Key Vault decommission (source contract)' {
+    # AC2: the cmdlet references no Key Vault secret cmdlet - the stored-password
+    #      push is gone, so re-entry of a stored credential is an out-of-band
+    #      operator step (documented in the cmdlet help), not a vault write.
+    It 'Export-RsMigrationInventory.ps1 references no Key Vault secret cmdlet' {
+        $content = Get-Content -LiteralPath $script:InventorySource -Raw
+        $content | Should -Not -Match 'Set-AzKeyVaultSecret'
+        $content | Should -Not -Match 'Get-AzKeyVaultSecret'
+    }
+
+    # AC5: the now-orphaned secret-name helper (its sole caller was the deleted push)
+    #      is removed. The helper name is assembled from fragments so this test file
+    #      itself stays clear of the symbol - AC5's grep spans tests/pester/ as well
+    #      as RsMigration/, and must return zero matches once PS2 lands.
+    It 'no longer defines or calls the orphaned secret-name helper' {
+        $helper = 'Get-RsMigration' + 'SecretName'
+        $content = Get-Content -LiteralPath $script:InventorySource -Raw
+        $content | Should -Not -Match $helper
     }
 }
