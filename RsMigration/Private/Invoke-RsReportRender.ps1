@@ -7,10 +7,13 @@ function Invoke-RsReportRender {
         not exist on the macOS/Linux quality gate, so the real render cannot run
         there. Routing the render through this wrapper lets tests Mock
         Invoke-RsReportRender instead and simulate a render failure by throwing.
-        The single statement below is the only code here - it cannot execute on
-        the gate and therefore stays uncovered, so it is kept to one line.
+        The render obtains its REST session from New-RsMigrationRestSession
+        (current Windows identity) and threads that exact session into
+        Out-RsRestCatalogItem via -WebSession; both statements are exercised
+        under mocks in tests.
     #>
     [CmdletBinding()]
     param([string]$RsItem, [string]$ReportPortalUri)
-    Out-RsRestCatalogItem -RsItem $RsItem -ReportPortalUri $ReportPortalUri -Destination $env:TEMP -Force
+    $session = New-RsMigrationRestSession -ReportPortalUri $ReportPortalUri
+    Out-RsRestCatalogItem -RsItem $RsItem -ReportPortalUri $ReportPortalUri -Destination $env:TEMP -Overwrite -WebSession $session
 }
