@@ -1,25 +1,24 @@
 function Backup-RsMigrationDatabase {
     <#
     .SYNOPSIS
-        Backs up the Reporting Services databases TO URL (impl-doc section 7.3 / B7).
+        Backs up the Reporting Services databases to .bak files on the source SMB
+        share using the current Windows identity.
     .DESCRIPTION
-        Creates the blob credential for the chosen auth model via the private
-        New-RsMigrationBlobCredential helper, then backs up ReportServer and
-        ReportServerTempDB to the Azure blob container with the native
-        BACKUP TO URL options the migration requires:
-        -Type Full -CopyOnly -CompressBackup -Checksum (impl-doc section 4 "Rules":
-        COPY_ONLY, COMPRESSION, CHECKSUM).
+        Makes one Backup-DbaDatabase call per database (ReportServer, then
+        ReportServerTempDB), writing each backup to its .bak file on the source
+        share. The output path is produced by Join-RsMigrationPath from
+        -SourceSharePath and carried on -FilePath (the dbatools idiom for a single
+        specific output file). No SQL credential is passed, so each backup runs as
+        the current Windows identity. The migration's backup rules are preserved:
+        -Type Full -CopyOnly -CompressBackup -Checksum.
     .PARAMETER SqlInstance
         The source SQL Server instance hosting ReportServer / ReportServerTempDB.
-    .PARAMETER AzureBaseUrl
-        The blob container URL backups are written to (Backup-DbaDatabase
-        -AzureBaseUrl, an alias of -StorageBaseUrl).
-    .PARAMETER Model
-        Blob-auth model passed to New-RsMigrationBlobCredential: SAS (default),
-        StorageKey, or ManagedIdentity.
-    .PARAMETER SecurePassword
-        The SAS token or storage access key as a SecureString (not used for
-        ManagedIdentity).
+    .PARAMETER SourceSharePath
+        The SMB share the .bak files are written to.
+    .PARAMETER ReportServerBak
+        The ReportServer backup file name.
+    .PARAMETER ReportServerTempDbBak
+        The ReportServerTempDB backup file name.
     #>
     [CmdletBinding()]
     param(
@@ -27,28 +26,30 @@ function Backup-RsMigrationDatabase {
         [string]$SqlInstance,
 
         [Parameter(Mandatory)]
-        [string]$AzureBaseUrl,
+        [string]$SourceSharePath,
 
-        [ValidateSet('SAS', 'StorageKey', 'ManagedIdentity')]
-        [string]$Model = 'SAS',
+        [Parameter(Mandatory)]
+        [string]$ReportServerBak,
 
-        [System.Security.SecureString]$SecurePassword
+        [Parameter(Mandatory)]
+        [string]$ReportServerTempDbBak
     )
 
-    $credParams = @{
-        SqlInstance  = $SqlInstance
-        ContainerUrl = $AzureBaseUrl
-        Model        = $Model
+    $backups = [ordered]@{
+        'ReportServer'       = $ReportServerBak
+        'ReportServerTempDB' = $ReportServerTempDbBak
     }
-    if ($PSBoundParameters.ContainsKey('SecurePassword')) {
-        $credParams.SecurePassword = $SecurePassword
-    }
-    New-RsMigrationBlobCredential @credParams
 
-    # dbatools swallows errors as warnings by default; -EnableException makes a
-    # backup failure terminating so callers (e.g. the runbook) see it and abort.
-    Backup-DbaDatabase -SqlInstance $SqlInstance `
-        -Database 'ReportServer', 'ReportServerTempDB' `
-        -AzureBaseUrl $AzureBaseUrl `
-        -Type Full -CopyOnly -CompressBackup -Checksum -EnableException
+    foreach ($entry in $backups.GetEnumerator()) {
+        $filePath = Join-RsMigrationPath -Share $SourceSharePath -FileName $entry.Value
+        # dbatools 2.8.2: -FilePath takes the complete backup file name including
+        # extension; a full instance-relative UNC path is accepted here (vs -Path
+        # which is a directory). Confirmed via Get-Help Backup-DbaDatabase.
+        # dbatools swallows errors as warnings by default; -EnableException makes a
+        # backup failure terminating so callers (e.g. the runbook) see it and abort.
+        Backup-DbaDatabase -SqlInstance $SqlInstance `
+            -Database $entry.Key `
+            -FilePath $filePath `
+            -Type Full -CopyOnly -CompressBackup -Checksum -EnableException
+    }
 }
