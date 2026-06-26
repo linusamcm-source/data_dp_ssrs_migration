@@ -5,27 +5,22 @@ function Restore-RsMigrationKey {
         (impl-doc 7.6 / runbook B10), enforcing the local-restart path.
     .DESCRIPTION
         Wraps Restore-RsEncryptionKey for the PBIRS instance. The key password is
-        read from Key Vault via the Private Get-KeyVaultSecret helper. The cmdlet
-        is invoked WITHOUT -Credential so the simple local service-restart path is
-        used; supplying a -Credential triggers the fragile remote stop/start path
-        (impl-doc 7.6 / risk register), so this wrapper rejects it with a
-        descriptive error and must be run locally on the target host.
+        supplied as a [SecureString] -KeyPassword (prompted interactively via
+        Read-Host -AsSecureString when omitted) and the .snk is read from
+        -KeyPath. The cmdlet is invoked WITHOUT -Credential so the simple local
+        service-restart path is used; supplying a -Credential triggers the fragile
+        remote stop/start path (impl-doc 7.6 / risk register), so this wrapper
+        rejects it with a descriptive error and must be run locally on the target
+        host.
     .EXAMPLE
-        Restore-RsMigrationKey -KeyPath C:\rs\ReportServer.snk -VaultName rsVault `
-            -PasswordSecretName rsKeyPwd
+        Restore-RsMigrationKey -KeyPath C:\rs\ReportServer.snk
     #>
     [CmdletBinding()]
-    [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingPlainTextForPassword', 'PasswordSecretName',
-        Justification = 'PasswordSecretName is a Key Vault secret *identifier*, not a password value.')]
     param(
         [Parameter(Mandatory)]
         [string]$KeyPath,
 
-        [Parameter(Mandatory)]
-        [string]$VaultName,
-
-        [Parameter(Mandatory)]
-        [string]$PasswordSecretName,
+        [SecureString]$KeyPassword,
 
         [string]$ReportServerInstance = 'PBIRS',
 
@@ -39,7 +34,10 @@ function Restore-RsMigrationKey {
         'Run this cmdlet on the PBIRS target host instead.'
     }
 
-    $password = Get-KeyVaultSecret -VaultName $VaultName -Name $PasswordSecretName
+    if (-not $KeyPassword) {
+        $KeyPassword = Read-Host -Prompt 'Encryption key password' -AsSecureString
+    }
+    $password = [System.Net.NetworkCredential]::new('', $KeyPassword).Password
 
     Restore-RsEncryptionKey -ReportServerInstance $ReportServerInstance `
         -Password $password -KeyPath $KeyPath -ErrorAction Stop

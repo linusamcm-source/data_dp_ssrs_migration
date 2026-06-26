@@ -15,14 +15,14 @@ Describe 'RsMigration manifest and import' {
         { Import-Module $script:ManifestPath -Force } | Should -Not -Throw
     }
 
-    It 'declares the three required modules' {
+    It 'declares the required modules without Az.KeyVault' {
         $data = Import-PowerShellDataFile -Path $script:ManifestPath
         $required = @($data.RequiredModules | ForEach-Object {
             if ($_ -is [hashtable]) { $_.ModuleName } else { $_ }
         })
         $required | Should -Contain 'ReportingServicesTools'
         $required | Should -Contain 'dbatools'
-        $required | Should -Contain 'Az.KeyVault'
+        $required | Should -Not -Contain 'Az.KeyVault'
     }
 }
 
@@ -55,7 +55,7 @@ Describe 'Underlying cmdlet resolution' {
         {
             Get-Command Backup-RsEncryptionKey, Restore-RsEncryptionKey, New-DbaCredential,
                 Backup-DbaDatabase, Restore-DbaDatabase, Set-RsDatabase, Invoke-DbaQuery,
-                Get-RsRestItemDataSource, Set-RsRestItemDataSource, Get-AzKeyVaultSecret -ErrorAction Stop
+                Get-RsRestItemDataSource, Set-RsRestItemDataSource -ErrorAction Stop
         } | Should -Not -Throw
     }
 }

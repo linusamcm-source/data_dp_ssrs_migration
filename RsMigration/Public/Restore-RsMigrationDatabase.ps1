@@ -1,34 +1,31 @@
 function Restore-RsMigrationDatabase {
     <#
     .SYNOPSIS
-        Restores the Reporting Services databases FROM URL on the target,
-        preserving the original database names (impl-doc section 7.4 / B8).
+        Restores the Reporting Services databases from the .bak files on the target
+        SMB share, preserving the original database names.
     .DESCRIPTION
-        Creates the blob credential for the chosen auth model on the TARGET
-        instance via the private New-RsMigrationBlobCredential helper, then
-        restores ReportServer and ReportServerTempDB from the Azure blob
-        container. Each database is restored under its identical original name
-        (impl-doc section 6 B8: "Restore FROM URL on target, identical DB
-        names"), with -WithReplace and a -Path of <container>/<db>.bak.
+        Restores ReportServer and ReportServerTempDB from their .bak files on the
+        target share. Each database is restored under its identical original name
+        with -WithReplace, the restore -Path for each being produced by
+        Join-RsMigrationPath from -TargetSharePath. No SQL credential is passed, so
+        each restore runs as the current Windows identity.
 
         It guards the identical-name requirement: it throws if asked to restore
         under any database name other than ReportServer / ReportServerTempDB.
     .PARAMETER SqlInstance
         The target SQL Server instance to restore ReportServer /
         ReportServerTempDB onto.
-    .PARAMETER AzureBaseUrl
-        The blob container URL the .bak files were written to. The restore -Path
-        for each database is <AzureBaseUrl>/<db>.bak.
+    .PARAMETER TargetSharePath
+        The SMB share the .bak files were copied to. The restore -Path for each
+        database is Join-RsMigrationPath of this share and the matching .bak name.
+    .PARAMETER ReportServerBak
+        The ReportServer backup file name.
+    .PARAMETER ReportServerTempDbBak
+        The ReportServerTempDB backup file name.
     .PARAMETER Database
-        The databases to restore. Defaults to ReportServer, ReportServerTempDB
-        and is constrained to that set: a name outside it throws, guarding the
+        The databases to restore. Defaults to ReportServer, ReportServerTempDB and
+        is constrained to that set: a name outside it throws, guarding the
         identical-name requirement.
-    .PARAMETER Model
-        Blob-auth model passed to New-RsMigrationBlobCredential: SAS (default),
-        StorageKey, or ManagedIdentity.
-    .PARAMETER SecurePassword
-        The SAS token or storage access key as a SecureString (not used for
-        ManagedIdentity).
     #>
     [CmdletBinding()]
     param(
@@ -36,43 +33,38 @@ function Restore-RsMigrationDatabase {
         [string]$SqlInstance,
 
         [Parameter(Mandatory)]
-        [string]$AzureBaseUrl,
+        [string]$TargetSharePath,
 
-        [string[]]$Database = @('ReportServer', 'ReportServerTempDB'),
+        [Parameter(Mandatory)]
+        [string]$ReportServerBak,
 
-        [ValidateSet('SAS', 'StorageKey', 'ManagedIdentity')]
-        [string]$Model = 'SAS',
+        [Parameter(Mandatory)]
+        [string]$ReportServerTempDbBak,
 
-        [System.Security.SecureString]$SecurePassword
+        [string[]]$Database = @('ReportServer', 'ReportServerTempDB')
     )
 
-    # Guard the identical-name requirement (impl-doc section 6 B8): the target
-    # databases must keep the original ReportServer / ReportServerTempDB names,
-    # so reject any other name up front and restore nothing.
+    # Guard the identical-name requirement: the target databases must keep the
+    # original ReportServer / ReportServerTempDB names, so reject any other name
+    # up front and restore nothing.
     $allowed = @('ReportServer', 'ReportServerTempDB')
     foreach ($db in $Database) {
         if ($db -notin $allowed) {
-            throw "Restore-RsMigrationDatabase only restores ReportServer / ReportServerTempDB under their original names (identical-name requirement, impl-doc section 6 B8); refusing '$db'."
+            throw "Restore-RsMigrationDatabase only restores ReportServer / ReportServerTempDB under their original names (identical-name requirement); refusing '$db'."
         }
     }
 
-    $credParams = @{
-        SqlInstance  = $SqlInstance
-        ContainerUrl = $AzureBaseUrl
-        Model        = $Model
+    $bakFor = @{
+        'ReportServer'       = $ReportServerBak
+        'ReportServerTempDB' = $ReportServerTempDbBak
     }
-    if ($PSBoundParameters.ContainsKey('SecurePassword')) {
-        $credParams.SecurePassword = $SecurePassword
-    }
-    New-RsMigrationBlobCredential @credParams
 
-    $container = $AzureBaseUrl.TrimEnd('/')
     foreach ($db in $Database) {
-        # dbatools swallows errors as warnings by default; -EnableException makes
-        # a restore failure terminating so callers (e.g. the runbook) see it and
-        # abort, matching the Backup-RsMigrationDatabase convention.
+        $path = Join-RsMigrationPath -Share $TargetSharePath -FileName $bakFor[$db]
+        # dbatools swallows errors as warnings by default; -EnableException makes a
+        # restore failure terminating so callers (e.g. the runbook) see it and abort.
         Restore-DbaDatabase -SqlInstance $SqlInstance `
-            -Path "$container/$db.bak" `
+            -Path $path `
             -DatabaseName $db `
             -WithReplace -EnableException
     }
