@@ -2,10 +2,10 @@ function Invoke-RsMigration {
     <#
     .SYNOPSIS
         Native PowerShell runbook that sequences the SSRS-to-PBIRS migration
-        end-to-end, replacing the retired rs_migration/runbook.py orchestrator.
+        end-to-end, replacing the retired Python runbook orchestrator.
     .DESCRIPTION
-        Calls the toolkit's OWN per-phase public cmdlets in-process (no pwsh
-        subprocess) in the required order, aborting on the first failure:
+        Calls the toolkit's OWN per-phase public cmdlets in-process (no child
+        pwsh process) in the required order, aborting on the first failure:
 
           1. Backup-RsMigrationKey       2. Backup-RsMigrationDatabase
           3. Copy-RsMigrationBackup      4. Restore-RsMigrationDatabase

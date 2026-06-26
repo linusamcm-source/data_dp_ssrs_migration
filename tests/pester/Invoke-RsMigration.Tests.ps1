@@ -23,9 +23,9 @@ AfterAll {
 # -----------------------------------------------------------------------------
 # CONTRACT THIS SUITE PINS (stated for the GREEN engineer)
 #
-# Invoke-RsMigration is the native PowerShell runbook that REPLACES
-# rs_migration/runbook.py. It sequences the toolkit's OWN per-phase PUBLIC
-# cmdlets IN-PROCESS (no pwsh subprocess), aborting on the first failure.
+# Invoke-RsMigration is the native PowerShell runbook that REPLACES the
+# retired Python runbook orchestrator. It sequences the toolkit's OWN per-phase
+# PUBLIC cmdlets IN-PROCESS (no child pwsh process), aborting on the first failure.
 #
 # REQUIRED PHASE ORDER (each phase calls the toolkit wrapper, not a bare lib cmdlet):
 #   Backup-RsMigrationKey -> Backup-RsMigrationDatabase -> Copy-RsMigrationBackup
