@@ -5,17 +5,17 @@ A single **PowerShell module** that migrates **SQL Server Reporting Services
 encryption key, the ReportServer databases, stored data-source credentials, and
 subscriptions.
 
-| Module | Path | Role |
-|--------|------|------|
-| `RsMigration` | `RsMigration/` | All migration cmdlets (key/DB backup-restore, point-at-DB, stale-key cleanup, selective subscription import, REST validation), sequenced end-to-end by `Invoke-RsMigration`. |
+| Module          | Path             | Role                                                                                                                                                                          |
+| --------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RsMigration` | `RsMigration/` | All migration cmdlets (key/DB backup-restore, point-at-DB, stale-key cleanup, selective subscription import, REST validation), sequenced end-to-end by`Invoke-RsMigration`. |
 
 `Invoke-RsMigration` is the runbook: it calls the toolkit's own per-phase cmdlets
 **in-process** (no child processes) in order, aborting on the first failure:
 
 ```
-key backup (A4) → DB backup (B7) → backup copy → DB restore (B8)
-   → point-at-DB (B9) → key restore (B10) → stale-key cleanup (B11)
-   → subscription import → REST validation (Phase C)
+1 key backup → 2 DB backup → 3 backup copy → 4 DB restore
+   → 5 point-at-DB → 6 key restore → 7 stale-key cleanup
+   → 8 subscription import → 9 REST validation
 ```
 
 A **dry run** executes only the read-only phases — a catalog inventory of the
@@ -40,12 +40,12 @@ Windows identity (e.g. `MYSTATE\lc.admin`):
 
 Backups move over **SMB fileshares**, not any cloud object store:
 
-- **B7** — `Backup-RsMigrationDatabase` runs `Backup-DbaDatabase` to write
+- **Phase 2** — `Backup-RsMigrationDatabase` runs `Backup-DbaDatabase` to write
   `ReportServer.bak` / `ReportServerTempDB.bak` to the **source** share
   (BACKUP TO DISK).
-- The runbook then copies those `.bak` files **share → share** (source share →
-  target share).
-- **B8** — `Restore-RsMigrationDatabase` runs `Restore-DbaDatabase` to restore
+- **Phase 3** — the runbook then copies those `.bak` files **share → share**
+  (source share → target share).
+- **Phase 4** — `Restore-RsMigrationDatabase` runs `Restore-DbaDatabase` to restore
   them from the **target** share (RESTORE FROM DISK), keeping the original
   database names.
 
@@ -104,26 +104,26 @@ before `dry-run`/`migrate` and threads each variable into the matching
 > line, **no quotes**, **no spaces** around `=`, `#` starts a comment. `.env` is
 > git-ignored — never commit a real one.
 
-| `.env` (RS_*) | `Invoke-RsMigration` parameter | Req? | Description |
-|---------------|--------------------------------|:----:|-------------|
-| `RS_SOURCE_PORTAL_URI` | `-SourceReportPortalUri` | ✅ | SOURCE report-portal root URL (dry-run inventory). |
-| `RS_TARGET_PORTAL_URI` | `-TargetReportPortalUri` | ✅ | TARGET report-portal root URL (subscription import + validation). |
-| `RS_SOURCE_SQL_INSTANCE` | `-SourceSqlInstance` | ✅ | SOURCE SQL instance backed up FROM (B7). |
-| `RS_TARGET_SQL_INSTANCE` | `-TargetSqlInstance` | ✅ | TARGET SQL instance restored ONTO (B8). |
-| `RS_DATABASE_SERVER_NAME` | `-DatabaseServerName` | ✅ | SQL server PBIRS is pointed at (B9). |
-| `RS_DATABASE_NAME` | `-DatabaseName` | ✅ | ReportServer DB to bind (B9) and clean (B11). |
-| `RS_SOURCE_SHARE` | `-SourceSharePath` | ✅ | SOURCE SMB share root — `.bak` files and `.snk` are written here. |
-| `RS_TARGET_SHARE` | `-TargetSharePath` | ✅ | TARGET SMB share root — backups are copied here, then restored from here. |
-| `RS_KEY_FILE` | `-KeyFile` | ✅ | Encryption-key `.snk` file **name** (joined onto the source share). |
-| `RS_REPORTSERVER_BAK` | `-ReportServerBak` | ✅ | ReportServer backup file **name**. |
-| `RS_REPORTSERVERTEMPDB_BAK` | `-ReportServerTempDbBak` | ✅ | ReportServerTempDB backup file **name**. |
-| `RS_STALE_MACHINE_NAME` | `-MachineName` | ✅ | Stale SOURCE machine whose `dbo.Keys` row is removed (B11). |
-| `RS_ACTIVE_MACHINE_NAME` | `-ActiveMachineName` | ✅ | Active TARGET machine that must NEVER be deleted (B11). |
-| `RS_REPORTS` | `-ReportItem` | ✅ | Catalog item paths to render-test. Comma-separated in `.env`; split into an array. |
-| `RS_DATA_SOURCES` | `-DataSource` | ✅ | Data-source paths to probe. Comma-separated in `.env`; split into an array. |
-| `RS_INCLUDE_SUBSCRIPTIONS` | `-IncludeSubscription` |  | Allow-list of subscription names to import. **Empty ⇒ import ALL.** |
-| `RS_DRY_RUN` | `-DryRun` |  | `1`/`true`/`yes`/`on` ⇒ read-only phases only. |
-| _(prompted)_ | `-KeyPassword` |  | `[SecureString]` protecting the `.snk`. **Never** in `.env`; prompted when omitted. |
+| `.env` (RS_*)               | `Invoke-RsMigration` parameter | Req? | Description                                                                                     |
+| ----------------------------- | -------------------------------- | :--: | ----------------------------------------------------------------------------------------------- |
+| `RS_SOURCE_PORTAL_URI`      | `-SourceReportPortalUri`       |  ✅  | SOURCE report-portal root URL (dry-run inventory).                                              |
+| `RS_TARGET_PORTAL_URI`      | `-TargetReportPortalUri`       |  ✅  | TARGET report-portal root URL (subscription import + validation).                               |
+| `RS_SOURCE_SQL_INSTANCE`    | `-SourceSqlInstance`           |  ✅  | SOURCE SQL instance backed up FROM (phase 2).                                                        |
+| `RS_TARGET_SQL_INSTANCE`    | `-TargetSqlInstance`           |  ✅  | TARGET SQL instance restored ONTO (phase 4).                                                         |
+| `RS_DATABASE_SERVER_NAME`   | `-DatabaseServerName`          |  ✅  | SQL server PBIRS is pointed at (phase 5).                                                            |
+| `RS_DATABASE_NAME`          | `-DatabaseName`                |  ✅  | ReportServer DB to bind (phase 5) and clean (phase 7).                                                   |
+| `RS_SOURCE_SHARE`           | `-SourceSharePath`             |  ✅  | SOURCE SMB share root —`.bak` files and `.snk` are written here.                           |
+| `RS_TARGET_SHARE`           | `-TargetSharePath`             |  ✅  | TARGET SMB share root — backups are copied here, then restored from here.                      |
+| `RS_KEY_FILE`               | `-KeyFile`                     |  ✅  | Encryption-key`.snk` file **name** (joined onto the source share).                      |
+| `RS_REPORTSERVER_BAK`       | `-ReportServerBak`             |  ✅  | ReportServer backup file**name**.                                                         |
+| `RS_REPORTSERVERTEMPDB_BAK` | `-ReportServerTempDbBak`       |  ✅  | ReportServerTempDB backup file**name**.                                                   |
+| `RS_STALE_MACHINE_NAME`     | `-MachineName`                 |  ✅  | Stale SOURCE machine whose`dbo.Keys` row is removed (phase 7).                                    |
+| `RS_ACTIVE_MACHINE_NAME`    | `-ActiveMachineName`           |  ✅  | Active TARGET machine that must NEVER be deleted (phase 7).                                         |
+| `RS_REPORTS`                | `-ReportItem`                  |  ✅  | Catalog item paths to render-test. Comma-separated in`.env`; split into an array.             |
+| `RS_DATA_SOURCES`           | `-DataSource`                  |  ✅  | Data-source paths to probe. Comma-separated in`.env`; split into an array.                    |
+| `RS_INCLUDE_SUBSCRIPTIONS`  | `-IncludeSubscription`         |      | Allow-list of subscription names to import.**Empty ⇒ import ALL.**                       |
+| `RS_DRY_RUN`                | `-DryRun`                      |      | `1`/`true`/`yes`/`on` ⇒ read-only phases only.                                         |
+| _(prompted)_                | `-KeyPassword`                 |      | `[SecureString]` protecting the `.snk`. **Never** in `.env`; prompted when omitted. |
 
 ---
 
@@ -150,13 +150,13 @@ portal onto the target portal over the PBIRS REST v2.0 API:
 run.bat <command>
 ```
 
-| Command | What it does |
-|---------|--------------|
-| `test` | PowerShell gate: Pester (≥ 90 % coverage) + PSScriptAnalyzer. |
-| `dry-run` | Run the runbook read-only (inventory + validation, no writes). |
-| `migrate` | Run the **full** mutating migration runbook (reads `.env`). |
-| `clean` | Delete coverage artifacts (`coverage.xml`, `.coverage`). |
-| `help` | Show usage (default when no command is given). |
+| Command     | What it does                                                       |
+| ----------- | ------------------------------------------------------------------ |
+| `test`    | PowerShell gate: Pester (≥ 90 % coverage) + PSScriptAnalyzer.     |
+| `dry-run` | Run the runbook read-only (inventory + validation, no writes).     |
+| `migrate` | Run the**full** mutating migration runbook (reads `.env`). |
+| `clean`   | Delete coverage artifacts (`coverage.xml`, `.coverage`).       |
+| `help`    | Show usage (default when no command is given).                     |
 
 ### `just` (cross-platform quality gate)
 
@@ -190,21 +190,22 @@ non-zero/throwing result identifies exactly where it stopped.
 
 ### Standalone cmdlets (`RsMigration` module)
 
-`Invoke-RsMigration` sequences these, but each can be run on its own:
+`Invoke-RsMigration` sequences phases 1–9; the data-source and recovery cmdlets
+are **standalone** (never called by the runbook). Each can also be run on its own:
 
-| Cmdlet | Key parameters | Phase |
-|--------|----------------|-------|
-| `Backup-RsMigrationKey` | `-KeyPath -KeyPassword [-ReportServerInstance -ReportServerVersion -ComputerName]` | A4 |
-| `Backup-RsMigrationDatabase` | `-SqlInstance -SourceSharePath -ReportServerBak -ReportServerTempDbBak` | B7 |
-| `Restore-RsMigrationDatabase` | `-SqlInstance -TargetSharePath -ReportServerBak -ReportServerTempDbBak` | B8 |
-| `Set-RsMigrationDatabase` | `-DatabaseServerName -Name [-DatabaseCredentialType]` (supports `-WhatIf`) | B9 |
-| `Restore-RsMigrationKey` | `-KeyPath -KeyPassword [-ReportServerInstance]` (local-restart only) | B10 |
-| `Remove-RsMigrationStaleKey` | `-SqlInstance -Database -MachineName -ActiveMachineName` | B11 |
-| `Import-RsMigrationSubscription` | `-SourceReportPortalUri -TargetReportPortalUri [-IncludeSubscription]` | subscriptions |
-| `Export-RsMigrationInventory` | `-ReportPortalUri [-RsFolder]` | A1 / dry-run |
-| `Set-RsMigrationDataSource` | `-RsItem -RsItemType [-ReportPortalUri -Credential -WebSession]` | re-key |
-| `Invoke-RsMigrationValidation` | `-ReportItem -DataSource -SqlInstance [-Database] -ReportPortalUri` | C |
-| `Reset-RsMigrationEncryptedContent` | `[-SqlMajorVersion -Force]` (high-impact, supports `-WhatIf`) | recovery |
+| Cmdlet                                | Key parameters                                                                       | Phase       |
+| ------------------------------------- | ------------------------------------------------------------------------------------ | ----------- |
+| `Backup-RsMigrationKey`             | `-KeyPath -KeyPassword [-ReportServerInstance -ReportServerVersion -ComputerName]` | 1           |
+| `Backup-RsMigrationDatabase`        | `-SqlInstance -SourceSharePath -ReportServerBak -ReportServerTempDbBak`            | 2           |
+| `Restore-RsMigrationDatabase`       | `-SqlInstance -TargetSharePath -ReportServerBak -ReportServerTempDbBak`            | 4           |
+| `Set-RsMigrationDatabase`           | `-DatabaseServerName -Name [-DatabaseCredentialType]` (supports `-WhatIf`)       | 5           |
+| `Restore-RsMigrationKey`            | `-KeyPath -KeyPassword [-ReportServerInstance]` (local-restart only)               | 6           |
+| `Remove-RsMigrationStaleKey`        | `-SqlInstance -Database -MachineName -ActiveMachineName`                           | 7           |
+| `Import-RsMigrationSubscription`    | `-SourceReportPortalUri -TargetReportPortalUri [-IncludeSubscription]`             | 8           |
+| `Invoke-RsMigrationValidation`      | `-ReportItem -DataSource -SqlInstance [-Database] -ReportPortalUri`                | 9 / dry-run |
+| `Export-RsMigrationInventory`       | `-ReportPortalUri [-RsFolder]`                                                     | dry-run     |
+| `Set-RsMigrationDataSource`         | `-RsItem -RsItemType [-ReportPortalUri -Credential -WebSession]`                   | standalone  |
+| `Reset-RsMigrationEncryptedContent` | `[-SqlMajorVersion -Force]` (high-impact, supports `-WhatIf`)                    | standalone  |
 
 ---
 
