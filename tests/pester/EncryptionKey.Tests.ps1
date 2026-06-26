@@ -1,58 +1,106 @@
 #Requires -Modules Pester
 
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingConvertToSecureStringWithPlainText', '',
-    Justification = 'Test builds an in-memory PSCredential from a literal password to exercise the -Credential rejection path.')]
+    Justification = 'Tests build in-memory SecureStrings from literal passwords to exercise the new -KeyPassword contract.')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '',
-    Justification = 'KeyPath is passed into the nested Should -Throw scriptblock; the analyzer does not trace that usage.')]
+    Justification = 'Expected* values are consumed inside nested Should -Invoke -ParameterFilter scriptblocks the analyzer does not trace.')]
 param()
 
 BeforeAll {
     $script:ModuleRoot = Join-Path $PSScriptRoot '..' '..' 'RsMigration'
     Import-Module (Join-Path $script:ModuleRoot 'RsMigration.psd1') -Force
+
+    # Source artefacts PS1 rewrites - used by the static source-contract assertions
+    # below. After PS1 the Get-KeyVaultSecret helper is gone and Az.KeyVault is no
+    # longer required, so "no Key Vault is invoked" can only be proven by grepping
+    # the source (a deleted/absent command cannot be mocked for Should -Invoke).
+    $script:BackupSource  = Join-Path $script:ModuleRoot 'Public' 'Backup-RsMigrationKey.ps1'
+    $script:RestoreSource = Join-Path $script:ModuleRoot 'Public' 'Restore-RsMigrationKey.ps1'
+    $script:HelperSource  = Join-Path $script:ModuleRoot 'Private' 'Get-KeyVaultSecret.ps1'
+    $script:ManifestPath  = Join-Path $script:ModuleRoot 'RsMigration.psd1'
 }
 
 AfterAll {
     Remove-Module RsMigration -Force -ErrorAction SilentlyContinue
 }
 
+Describe 'Backup-RsMigrationKey parameter contract' {
+    # AC2: -KeyPassword [SecureString] and -KeyPath present; Key Vault params gone.
+    It 'exposes -KeyPassword typed as [SecureString]' {
+        $param = (Get-Command Backup-RsMigrationKey).Parameters['KeyPassword']
+        $param | Should -Not -BeNullOrEmpty
+        $param.ParameterType | Should -Be ([securestring])
+    }
+
+    It 'exposes -KeyPath' {
+        (Get-Command Backup-RsMigrationKey).Parameters.Keys | Should -Contain 'KeyPath'
+    }
+
+    It 'no longer exposes the Key Vault parameters' {
+        $keys = (Get-Command Backup-RsMigrationKey).Parameters.Keys
+        $keys | Should -Not -Contain 'VaultName'
+        $keys | Should -Not -Contain 'PasswordSecretName'
+        $keys | Should -Not -Contain 'SnkSecretName'
+    }
+}
+
+Describe 'Restore-RsMigrationKey parameter contract' {
+    # AC3: -KeyPassword [SecureString] present; Key Vault params gone.
+    It 'exposes -KeyPassword typed as [SecureString]' {
+        $param = (Get-Command Restore-RsMigrationKey).Parameters['KeyPassword']
+        $param | Should -Not -BeNullOrEmpty
+        $param.ParameterType | Should -Be ([securestring])
+    }
+
+    It 'no longer exposes the Key Vault parameters' {
+        $keys = (Get-Command Restore-RsMigrationKey).Parameters.Keys
+        $keys | Should -Not -Contain 'VaultName'
+        $keys | Should -Not -Contain 'PasswordSecretName'
+    }
+}
+
 Describe 'Backup-RsMigrationKey' {
-    BeforeEach {
-        # Backup-RsEncryptionKey writes the .snk to -KeyPath; use a real temp path
-        # so the wrapper's post-backup read-back-and-encode step has a file to read.
-        $script:KeyPath = Join-Path ([System.IO.Path]::GetTempPath()) ("rsmig-{0}.snk" -f ([guid]::NewGuid()))
-    }
-
-    AfterEach {
-        Remove-Item -Path $script:KeyPath -Force -ErrorAction SilentlyContinue
-    }
-
-    # AC: calls Backup-RsEncryptionKey with -Password from Get-KeyVaultSecret and the supplied -KeyPath.
-    It 'calls Backup-RsEncryptionKey with the Key Vault password and supplied KeyPath' {
-        InModuleScope RsMigration -Parameters @{ ExpectedKeyPath = $script:KeyPath } {
-            param($ExpectedKeyPath)
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            Mock Backup-RsEncryptionKey { [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](1, 2, 3)) }
-            Mock Set-AzKeyVaultSecret { }
+    # AC4: passes the supplied -KeyPath and the DECRYPTED -KeyPassword straight to
+    #      Backup-RsEncryptionKey -Password. No read-back, no secret write.
+    It 'calls Backup-RsEncryptionKey with the decrypted KeyPassword and supplied KeyPath' {
+        InModuleScope RsMigration -Parameters @{ ExpectedPwd = 'snk-pwd'; ExpectedKeyPath = 'C:\rs\ReportServer.snk' } {
+            param($ExpectedPwd, $ExpectedKeyPath)
+            Mock Backup-RsEncryptionKey { }
 
             Backup-RsMigrationKey -KeyPath $ExpectedKeyPath `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk'
+                -KeyPassword (ConvertTo-SecureString $ExpectedPwd -AsPlainText -Force)
 
             Should -Invoke Backup-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
-                $Password -eq 'snk-pwd' -and $KeyPath -eq $ExpectedKeyPath
+                $Password -eq $ExpectedPwd -and $KeyPath -eq $ExpectedKeyPath
             }
         }
     }
 
-    # AC: defaults the SOURCE connection params via Resolve-RsConnection (PBIRS-first).
-    It 'forwards Resolve-RsConnection defaults to Backup-RsEncryptionKey when no connection params are supplied' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            Mock Backup-RsEncryptionKey { [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](1, 2, 3)) }
-            Mock Set-AzKeyVaultSecret { }
+    # AC6: when -KeyPassword is omitted, prompt for it via Read-Host -AsSecureString
+    #      and forward the decrypted value to Backup-RsEncryptionKey.
+    It 'prompts for the password via Read-Host -AsSecureString when -KeyPassword is omitted' {
+        InModuleScope RsMigration -Parameters @{ ExpectedKeyPath = 'C:\rs\ReportServer.snk' } {
+            param($ExpectedKeyPath)
+            Mock Backup-RsEncryptionKey { }
+            Mock Read-Host { ConvertTo-SecureString 'from-prompt' -AsPlainText -Force } -ParameterFilter { $AsSecureString }
 
-            Backup-RsMigrationKey -KeyPath $KeyPath `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk'
+            Backup-RsMigrationKey -KeyPath $ExpectedKeyPath
+
+            Should -Invoke Read-Host -Times 1 -Exactly -ParameterFilter { $AsSecureString }
+            Should -Invoke Backup-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
+                $Password -eq 'from-prompt' -and $KeyPath -eq $ExpectedKeyPath
+            }
+        }
+    }
+
+    # Preserved (pre-existing, non-Key-Vault) behaviour: SOURCE connection defaults
+    # flow through Resolve-RsConnection (PBIRS-first), overridable to the SSRS source.
+    It 'forwards Resolve-RsConnection PBIRS-first defaults to Backup-RsEncryptionKey when no connection params are supplied' {
+        InModuleScope RsMigration {
+            Mock Backup-RsEncryptionKey { }
+
+            Backup-RsMigrationKey -KeyPath 'C:\rs\ReportServer.snk' `
+                -KeyPassword (ConvertTo-SecureString 'snk-pwd' -AsPlainText -Force)
 
             Should -Invoke Backup-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
                 $ReportServerInstance -eq 'PBIRS' -and $ReportServerVersion -eq 'PowerBIReportServer'
@@ -60,16 +108,12 @@ Describe 'Backup-RsMigrationKey' {
         }
     }
 
-    # AC: forwards caller-supplied SOURCE connection params, overridable to the SSRS source.
     It 'forwards caller-supplied SOURCE connection params (SSRS / SQLServer2019) to Backup-RsEncryptionKey' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            Mock Backup-RsEncryptionKey { [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](1, 2, 3)) }
-            Mock Set-AzKeyVaultSecret { }
+        InModuleScope RsMigration {
+            Mock Backup-RsEncryptionKey { }
 
-            Backup-RsMigrationKey -KeyPath $KeyPath `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk' `
+            Backup-RsMigrationKey -KeyPath 'C:\rs\ReportServer.snk' `
+                -KeyPassword (ConvertTo-SecureString 'snk-pwd' -AsPlainText -Force) `
                 -ReportServerInstance 'SSRS' -ReportServerVersion 'SQLServer2019'
 
             Should -Invoke Backup-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
@@ -78,17 +122,13 @@ Describe 'Backup-RsMigrationKey' {
         }
     }
 
-    # AC: forwards an overridden -ComputerName to the SOURCE connection.
     It 'forwards a caller-supplied -ComputerName to Backup-RsEncryptionKey' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
+        InModuleScope RsMigration {
             $sourceHost = 'SOURCEVM'
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            Mock Backup-RsEncryptionKey { [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](1, 2, 3)) }
-            Mock Set-AzKeyVaultSecret { }
+            Mock Backup-RsEncryptionKey { }
 
-            Backup-RsMigrationKey -KeyPath $KeyPath `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk' `
+            Backup-RsMigrationKey -KeyPath 'C:\rs\ReportServer.snk' `
+                -KeyPassword (ConvertTo-SecureString 'snk-pwd' -AsPlainText -Force) `
                 -ComputerName $sourceHost
 
             Should -Invoke Backup-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
@@ -96,102 +136,101 @@ Describe 'Backup-RsMigrationKey' {
             }
         }
     }
-
-    # AC: on success, pushes the .snk bytes to Key Vault as base64 via Set-AzKeyVaultSecret.
-    It 'pushes the .snk bytes to Key Vault as base64 on success' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
-            $keyBytes = [byte[]](10, 20, 30, 200, 255)
-            $expectedB64 = [System.Convert]::ToBase64String($keyBytes)
-
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            # Backup-RsEncryptionKey writes the .snk; simulate by writing the bytes to -KeyPath.
-            Mock Backup-RsEncryptionKey { [System.IO.File]::WriteAllBytes($KeyPath, $keyBytes) }.GetNewClosure()
-            Mock Set-AzKeyVaultSecret { }
-
-            Backup-RsMigrationKey -KeyPath $KeyPath `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk'
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 1 -Exactly -ParameterFilter {
-                $VaultName -eq 'rsVault' -and
-                $Name -eq 'rsSnk' -and
-                ([System.Net.NetworkCredential]::new('', $SecretValue).Password) -eq $expectedB64
-            }
-        }
-    }
-
-    # AC: when Backup-RsEncryptionKey throws, rethrow and do NOT call Set-AzKeyVaultSecret.
-    It 'rethrows and does not write to Key Vault when Backup-RsEncryptionKey throws' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            Mock Backup-RsEncryptionKey { throw 'WMI BackupEncryptionKey failed (HRESULT 0x80131500)' }
-            Mock Set-AzKeyVaultSecret { }
-
-            { Backup-RsMigrationKey -KeyPath $KeyPath `
-                    -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk' } |
-                Should -Throw '*BackupEncryptionKey failed*'
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
-        }
-    }
-
-    # AC (hardening): a NON-terminating failure from Backup-RsEncryptionKey (the
-    # realistic WMI default) must still abort via -ErrorAction Stop, so a stale
-    # .snk is never base64'd and pushed to Key Vault.
-    It 'does not write to Key Vault when Backup-RsEncryptionKey fails non-terminating' {
-        InModuleScope RsMigration -Parameters @{ KeyPath = $script:KeyPath } {
-            param($KeyPath)
-            # Pre-create a stale .snk so a fall-through would read it and push garbage.
-            [System.IO.File]::WriteAllBytes($KeyPath, [byte[]](9, 9, 9))
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
-            # Non-terminating failure: the backup writes nothing new and only Write-Errors.
-            Mock Backup-RsEncryptionKey { Write-Error 'WMI BackupEncryptionKey non-terminating failure' }
-            Mock Set-AzKeyVaultSecret { }
-
-            { Backup-RsMigrationKey -KeyPath $KeyPath `
-                    -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -SnkSecretName 'rsSnk' } |
-                Should -Throw
-
-            Should -Invoke Set-AzKeyVaultSecret -Times 0 -Exactly
-        }
-    }
 }
 
 Describe 'Restore-RsMigrationKey' {
-    # AC: calls Restore-RsEncryptionKey with -ReportServerInstance 'PBIRS', -Password from
-    #     Get-KeyVaultSecret, -KeyPath, and WITHOUT -Credential.
-    It 'calls Restore-RsEncryptionKey with PBIRS, the Key Vault password, KeyPath, and no -Credential' {
-        InModuleScope RsMigration {
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
+    # AC5: calls Restore-RsEncryptionKey for PBIRS, reading the .snk from -KeyPath and
+    #      passing the DECRYPTED KeyPassword as -Password, WITHOUT -Credential.
+    It 'calls Restore-RsEncryptionKey with PBIRS, the decrypted KeyPassword, KeyPath, and no -Credential' {
+        InModuleScope RsMigration -Parameters @{ ExpectedPwd = 'snk-pwd'; ExpectedKeyPath = 'C:\rs\ReportServer.snk' } {
+            param($ExpectedPwd, $ExpectedKeyPath)
             Mock Restore-RsEncryptionKey { }
 
-            Restore-RsMigrationKey -KeyPath 'C:\rs\ReportServer.snk' `
-                -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd'
+            Restore-RsMigrationKey -KeyPath $ExpectedKeyPath `
+                -KeyPassword (ConvertTo-SecureString $ExpectedPwd -AsPlainText -Force)
 
             Should -Invoke Restore-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
                 $ReportServerInstance -eq 'PBIRS' -and
-                $Password -eq 'snk-pwd' -and
-                $KeyPath -eq 'C:\rs\ReportServer.snk' -and
+                $Password -eq $ExpectedPwd -and
+                $KeyPath -eq $ExpectedKeyPath -and
                 -not $PSBoundParameters.ContainsKey('Credential')
             }
         }
     }
 
-    # AC: throws a descriptive error if a -Credential value is supplied (enforces local-restart path).
-    It 'throws a descriptive error when -Credential is supplied and never calls Restore-RsEncryptionKey' {
+    # AC6: when -KeyPassword is omitted, prompt for it via Read-Host -AsSecureString.
+    It 'prompts for the password via Read-Host -AsSecureString when -KeyPassword is omitted' {
+        InModuleScope RsMigration -Parameters @{ ExpectedKeyPath = 'C:\rs\ReportServer.snk' } {
+            param($ExpectedKeyPath)
+            Mock Restore-RsEncryptionKey { }
+            Mock Read-Host { ConvertTo-SecureString 'from-prompt' -AsPlainText -Force } -ParameterFilter { $AsSecureString }
+
+            Restore-RsMigrationKey -KeyPath $ExpectedKeyPath
+
+            Should -Invoke Read-Host -Times 1 -Exactly -ParameterFilter { $AsSecureString }
+            Should -Invoke Restore-RsEncryptionKey -Times 1 -Exactly -ParameterFilter {
+                $Password -eq 'from-prompt' -and $KeyPath -eq $ExpectedKeyPath
+            }
+        }
+    }
+
+    # Preserved behaviour: supplying -Credential forces the fragile remote restart
+    # path, so the wrapper rejects it with a descriptive local-only error.
+    It 'throws a descriptive local-only error when -Credential is supplied and never calls Restore-RsEncryptionKey' {
         InModuleScope RsMigration {
-            Mock Get-KeyVaultSecret { 'snk-pwd' } -ParameterFilter { -not $AsBytes }
             Mock Restore-RsEncryptionKey { }
 
             $cred = [System.Management.Automation.PSCredential]::new(
                 'dom\svc', (ConvertTo-SecureString 'p@ss' -AsPlainText -Force))
 
             { Restore-RsMigrationKey -KeyPath 'C:\rs\ReportServer.snk' `
-                    -VaultName 'rsVault' -PasswordSecretName 'rsKeyPwd' -Credential $cred } |
+                    -KeyPassword (ConvertTo-SecureString 'snk-pwd' -AsPlainText -Force) `
+                    -Credential $cred } |
                 Should -Throw '*local*'
 
             Should -Invoke Restore-RsEncryptionKey -Times 0 -Exactly
         }
+    }
+}
+
+Describe 'Key Vault decommission (source contract)' {
+    # AC1: the Private Get-KeyVaultSecret helper is deleted.
+    It 'has removed the Private Get-KeyVaultSecret helper' {
+        Test-Path -LiteralPath $script:HelperSource | Should -BeFalse
+    }
+
+    # AC1 / step 2: neither cmdlet references any Key Vault cmdlet or the deleted helper.
+    It 'Backup-RsMigrationKey.ps1 references no Key Vault cmdlet or Get-KeyVaultSecret helper' {
+        $content = Get-Content -LiteralPath $script:BackupSource -Raw
+        $content | Should -Not -Match 'Get-AzKeyVaultSecret'
+        $content | Should -Not -Match 'Set-AzKeyVaultSecret'
+        $content | Should -Not -Match 'Get-KeyVaultSecret'
+    }
+
+    It 'Restore-RsMigrationKey.ps1 references no Key Vault cmdlet or Get-KeyVaultSecret helper' {
+        $content = Get-Content -LiteralPath $script:RestoreSource -Raw
+        $content | Should -Not -Match 'Get-AzKeyVaultSecret'
+        $content | Should -Not -Match 'Set-AzKeyVaultSecret'
+        $content | Should -Not -Match 'Get-KeyVaultSecret'
+    }
+
+    # AC7: -KeyPath is caller-supplied; no hardcoded UNC host literal in either file.
+    It 'Backup-RsMigrationKey.ps1 contains no hardcoded UNC host literal' {
+        (Get-Content -LiteralPath $script:BackupSource -Raw) | Should -Not -Match '\\\\[A-Za-z0-9]'
+    }
+
+    It 'Restore-RsMigrationKey.ps1 contains no hardcoded UNC host literal' {
+        (Get-Content -LiteralPath $script:RestoreSource -Raw) | Should -Not -Match '\\\\[A-Za-z0-9]'
+    }
+
+    # AC8: the manifest no longer requires Az.KeyVault.
+    It 'RsMigration.psd1 RequiredModules no longer lists Az.KeyVault (only ReportingServicesTools and dbatools remain)' {
+        $data = Import-PowerShellDataFile -Path $script:ManifestPath
+        $required = @($data.RequiredModules | ForEach-Object {
+                if ($_ -is [hashtable]) { $_.ModuleName } else { $_ }
+            })
+        $required | Should -Not -Contain 'Az.KeyVault'
+        $required | Should -Contain 'ReportingServicesTools'
+        $required | Should -Contain 'dbatools'
     }
 }
