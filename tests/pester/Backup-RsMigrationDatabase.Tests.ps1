@@ -3,183 +3,152 @@
 BeforeAll {
     $script:ModuleRoot = Join-Path $PSScriptRoot '..' '..' 'RsMigration'
     Import-Module (Join-Path $script:ModuleRoot 'RsMigration.psd1') -Force
-
-    # Test-only helper: build a SecureString from a literal to exercise the
-    # credential-forwarding path. PSAvoidUsingConvertToSecureStringWithPlainText
-    # is suppressed here because no plaintext secret is ever persisted - this is a
-    # throwaway value created solely to assert how the wrapper forwards it. The
-    # secret is built in the test (outer) scope and passed into InModuleScope via
-    # -Parameters, because functions defined here are not visible inside the
-    # module's session state.
-    function script:New-PlainSecret {
-        [Diagnostics.CodeAnalysis.SuppressMessageAttribute(
-            'PSAvoidUsingConvertToSecureStringWithPlainText', '',
-            Justification = 'Test-only literal SecureString to exercise the credential-forwarding path.')]
-        [OutputType([System.Security.SecureString])]
-        param([Parameter(Mandatory)][string]$Text)
-        ConvertTo-SecureString $Text -AsPlainText -Force
-    }
 }
 
 AfterAll {
     Remove-Module RsMigration -Force -ErrorAction SilentlyContinue
 }
 
-Describe 'New-RsMigrationBlobCredential (Private helper)' {
+Describe 'Backup-RsMigrationDatabase (Public)' {
 
-    Context 'SAS model' {
-        It 'calls New-DbaCredential with the SAS identity and the SAS SecurePassword' {
-            $sas = New-PlainSecret -Text 'sas-token-value'
-            InModuleScope RsMigration -Parameters @{ Sas = $sas } {
-                param($Sas)
-                Mock New-DbaCredential {}
+    # Post-PS3 contract: back ReportServer / ReportServerTempDB up to .bak files on
+    # the SOURCE fileshare using the current Windows identity. One Backup-DbaDatabase
+    # call per database; the full backup-file path is carried on -FilePath (the
+    # dbatools idiom for a specific output file) and is produced by
+    # Join-RsMigrationPath from -SourceSharePath. No Azure blob URL, no SqlCredential.
+    Context 'fileshare backup' {
 
-                New-RsMigrationBlobCredential -SqlInstance 'SOURCEVM' `
-                    -ContainerUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                    -Model 'SAS' -SecurePassword $Sas
+        It 'backs up ReportServer to the source-share ReportServer.bak path on -FilePath' {
+            InModuleScope RsMigration {
+                Mock Backup-DbaDatabase {}
 
-                Should -Invoke New-DbaCredential -Times 1 -Exactly -ParameterFilter {
-                    $Identity -eq 'SHARED ACCESS SIGNATURE' -and
-                    $null -ne $SecurePassword -and
-                    ([pscredential]::new('u', $SecurePassword)).GetNetworkCredential().Password -eq 'sas-token-value'
+                Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
+                    -SourceSharePath '\\SOURCEVM\FileShare' `
+                    -ReportServerBak 'ReportServer.bak' `
+                    -ReportServerTempDbBak 'ReportServerTempDB.bak'
+
+                Should -Invoke Backup-DbaDatabase -Times 1 -Exactly -ParameterFilter {
+                    "$SqlInstance" -eq 'SOURCEVM' -and
+                    $Database -eq 'ReportServer' -and
+                    $FilePath -eq '\\SOURCEVM\FileShare\ReportServer.bak'
+                }
+            }
+        }
+
+        It 'backs up ReportServerTempDB to the source-share ReportServerTempDB.bak path on -FilePath' {
+            InModuleScope RsMigration {
+                Mock Backup-DbaDatabase {}
+
+                Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
+                    -SourceSharePath '\\SOURCEVM\FileShare' `
+                    -ReportServerBak 'ReportServer.bak' `
+                    -ReportServerTempDbBak 'ReportServerTempDB.bak'
+
+                Should -Invoke Backup-DbaDatabase -Times 1 -Exactly -ParameterFilter {
+                    "$SqlInstance" -eq 'SOURCEVM' -and
+                    $Database -eq 'ReportServerTempDB' -and
+                    $FilePath -eq '\\SOURCEVM\FileShare\ReportServerTempDB.bak'
+                }
+            }
+        }
+
+        It 'makes one Backup-DbaDatabase call per database (twice total)' {
+            InModuleScope RsMigration {
+                Mock Backup-DbaDatabase {}
+
+                Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
+                    -SourceSharePath '\\SOURCEVM\FileShare' `
+                    -ReportServerBak 'ReportServer.bak' `
+                    -ReportServerTempDbBak 'ReportServerTempDB.bak'
+
+                Should -Invoke Backup-DbaDatabase -Times 2 -Exactly
+            }
+        }
+
+        It 'uses the current Windows identity (no -SqlCredential) and no Azure blob URL' {
+            InModuleScope RsMigration {
+                Mock Backup-DbaDatabase {}
+
+                Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
+                    -SourceSharePath '\\SOURCEVM\FileShare' `
+                    -ReportServerBak 'ReportServer.bak' `
+                    -ReportServerTempDbBak 'ReportServerTempDB.bak'
+
+                Should -Invoke Backup-DbaDatabase -Times 2 -Exactly -ParameterFilter {
+                    # -AzureBaseUrl is an alias of -StorageBaseUrl; assert the real
+                    # parameter is never bound (no blob), and no SQL credential is
+                    # passed (current Windows identity only).
+                    $null -eq $SqlCredential -and $null -eq $StorageBaseUrl
+                }
+            }
+        }
+
+        It 'passes the migration-critical backup flags (-Type Full -CopyOnly -CompressBackup -Checksum -EnableException) on every call' {
+            InModuleScope RsMigration {
+                Mock Backup-DbaDatabase {}
+
+                Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
+                    -SourceSharePath '\\SOURCEVM\FileShare' `
+                    -ReportServerBak 'ReportServer.bak' `
+                    -ReportServerTempDbBak 'ReportServerTempDB.bak'
+
+                # Guard against a regression silently dropping any of the backup
+                # rules: both calls must carry all five flags.
+                Should -Invoke Backup-DbaDatabase -Times 2 -Exactly -ParameterFilter {
+                    $Type -eq 'Full' -and
+                    $CopyOnly -and
+                    $CompressBackup -and
+                    $Checksum -and
+                    $EnableException
                 }
             }
         }
     }
 
-    Context 'StorageKey model' {
-        It 'calls New-DbaCredential with the container URL as identity and the access key SecurePassword' {
-            $key = New-PlainSecret -Text 'storage-access-key'
-            InModuleScope RsMigration -Parameters @{ Key = $key } {
-                param($Key)
-                Mock New-DbaCredential {}
+    # Pin the post-PS3 parameter contract: the fileshare params must exist and the
+    # decommissioned Azure params (Model/AzureBaseUrl) must be gone. This fails fast
+    # if a future change reintroduces a blob parameter or renames a share param.
+    Context 'parameter contract' {
 
-                New-RsMigrationBlobCredential -SqlInstance 'SOURCEVM' `
-                    -ContainerUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                    -Model 'StorageKey' -SecurePassword $Key
+        It 'exposes the fileshare params and no Azure (Model/AzureBaseUrl) params' {
+            $params = (Get-Command Backup-RsMigrationDatabase).Parameters.Keys
 
-                Should -Invoke New-DbaCredential -Times 1 -Exactly -ParameterFilter {
-                    $Identity -eq 'https://rsmigsa.blob.core.windows.net/rsmig' -and
-                    $null -ne $SecurePassword -and
-                    ([pscredential]::new('u', $SecurePassword)).GetNetworkCredential().Password -eq 'storage-access-key'
-                }
+            foreach ($expected in @('SourceSharePath', 'ReportServerBak', 'ReportServerTempDbBak')) {
+                $params | Should -Contain $expected
             }
-        }
-    }
-
-    Context 'ManagedIdentity model' {
-        It 'calls New-DbaCredential with the Managed Identity and NO SecurePassword' {
-            InModuleScope RsMigration {
-                Mock New-DbaCredential {}
-
-                New-RsMigrationBlobCredential -SqlInstance 'TARGETVM' `
-                    -ContainerUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                    -Model 'ManagedIdentity'
-
-                Should -Invoke New-DbaCredential -Times 1 -Exactly -ParameterFilter {
-                    $Identity -eq 'Managed Identity' -and
-                    $null -eq $SecurePassword -and
-                    -not $PSBoundParameters.ContainsKey('SecurePassword')
-                }
-            }
-        }
-    }
-
-    Context 'invalid model' {
-        It 'rejects an unknown Model value with a terminating ValidateSet error' {
-            InModuleScope RsMigration {
-                Mock New-DbaCredential {}
-                {
-                    New-RsMigrationBlobCredential -SqlInstance 'X' `
-                        -ContainerUrl 'https://x/c' -Model 'NotAModel'
-                } | Should -Throw
-                Should -Invoke New-DbaCredential -Times 0 -Exactly
-            }
-        }
-    }
-
-    Context 'missing password' {
-        It 'throws (no credential created) when the SAS model omits -SecurePassword' {
-            InModuleScope RsMigration {
-                Mock New-DbaCredential {}
-                {
-                    New-RsMigrationBlobCredential -SqlInstance 'X' `
-                        -ContainerUrl 'https://x/c' -Model 'SAS'
-                } | Should -Throw '*SAS model requires*'
-                Should -Invoke New-DbaCredential -Times 0 -Exactly
-            }
-        }
-
-        It 'throws (no credential created) when the StorageKey model omits -SecurePassword' {
-            InModuleScope RsMigration {
-                Mock New-DbaCredential {}
-                {
-                    New-RsMigrationBlobCredential -SqlInstance 'X' `
-                        -ContainerUrl 'https://x/c' -Model 'StorageKey'
-                } | Should -Throw '*StorageKey model requires*'
-                Should -Invoke New-DbaCredential -Times 0 -Exactly
+            foreach ($forbidden in @('Model', 'AzureBaseUrl')) {
+                $params | Should -Not -Contain $forbidden
             }
         }
     }
 }
 
-Describe 'Backup-RsMigrationDatabase (Public)' {
+Describe 'Azure blob backup/restore fully removed (PS3 cross-cutting)' {
 
-    It 'backs up ReportServer and ReportServerTempDB TO URL with the required flags' {
-        $sas = New-PlainSecret -Text 'sas-token-value'
-        InModuleScope RsMigration -Parameters @{ Sas = $sas } {
-            param($Sas)
-            Mock New-DbaCredential {}
-            Mock Backup-DbaDatabase {}
-
-            Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
-                -AzureBaseUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                -Model 'SAS' -SecurePassword $Sas
-
-            Should -Invoke Backup-DbaDatabase -Times 1 -Exactly -ParameterFilter {
-                # -AzureBaseUrl is an alias of -StorageBaseUrl; it binds to the real
-                # parameter name inside the mock filter.
-                $StorageBaseUrl -eq 'https://rsmigsa.blob.core.windows.net/rsmig' -and
-                ($Database -contains 'ReportServer') -and
-                ($Database -contains 'ReportServerTempDB') -and
-                $Type -eq 'Full' -and
-                $CopyOnly -and
-                $CompressBackup -and
-                $Checksum
-            }
-        }
+    BeforeAll {
+        $script:ModuleSource = Join-Path $PSScriptRoot '..' '..' 'RsMigration'
     }
 
-    It 'creates the blob credential for the chosen model before backing up' {
-        $sas = New-PlainSecret -Text 'sas-token-value'
-        InModuleScope RsMigration -Parameters @{ Sas = $sas } {
-            param($Sas)
-            Mock New-DbaCredential {}
-            Mock Backup-DbaDatabase {}
-
-            Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
-                -AzureBaseUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                -Model 'SAS' -SecurePassword $Sas
-
-            Should -Invoke New-DbaCredential -Times 1 -Exactly -ParameterFilter {
-                $Identity -eq 'SHARED ACCESS SIGNATURE'
-            }
-        }
+    It 'has deleted the New-RsMigrationBlobCredential.ps1 private helper' {
+        $cred = Join-Path $script:ModuleSource 'Private' 'New-RsMigrationBlobCredential.ps1'
+        Test-Path -Path $cred | Should -BeFalse
     }
 
-    It 'supports the ManagedIdentity model with no SecurePassword' {
-        InModuleScope RsMigration {
-            Mock New-DbaCredential {}
-            Mock Backup-DbaDatabase {}
+    It 'contains no Azure blob references anywhere under RsMigration/' {
+        $hits = Get-ChildItem -Path $script:ModuleSource -Recurse -Filter '*.ps1' -File |
+            Select-String -SimpleMatch -Pattern @(
+                'AzureBaseUrl', 'New-RsMigrationBlobCredential', 'blob', 'TO URL'
+            )
+        $hits | Should -BeNullOrEmpty
+    }
 
-            Backup-RsMigrationDatabase -SqlInstance 'SOURCEVM' `
-                -AzureBaseUrl 'https://rsmigsa.blob.core.windows.net/rsmig' `
-                -Model 'ManagedIdentity'
-
-            Should -Invoke New-DbaCredential -Times 1 -Exactly -ParameterFilter {
-                $Identity -eq 'Managed Identity' -and $null -eq $SecurePassword
-            }
-            Should -Invoke Backup-DbaDatabase -Times 1 -Exactly
-        }
+    It 'hardcodes no UNC literal in production scripts (paths come from Join-RsMigrationPath params)' {
+        # A UNC literal is two backslashes followed by a host character. The only
+        # place a backslash-joined path is legitimately assembled is
+        # Join-RsMigrationPath (from its parameters), so that file is exempt.
+        $hits = Get-ChildItem -Path $script:ModuleSource -Recurse -Filter '*.ps1' -File |
+            Where-Object { $_.Name -ne 'Join-RsMigrationPath.ps1' } |
+            Select-String -Pattern '\\\\[A-Za-z0-9]'
+        $hits | Should -BeNullOrEmpty
     }
 }
